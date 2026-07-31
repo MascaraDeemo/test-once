@@ -1,6 +1,6 @@
 {
   "name": "test-once",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Stop duplicate expensive full-suite runs across Codex sessions, safely reuse exact passing results, and report avoided runs and time.",
   "author": {
     "name": "MascaraDeemo",
@@ -11,10 +11,15 @@
   "license": "Apache-2.0",
   "keywords": [
     "codex",
+    "codex-plugin",
     "testing",
     "unit-tests",
     "single-flight",
-    "cache"
+    "cache",
+    "golang",
+    "typescript",
+    "monorepo",
+    "test-automation"
   ],
   "skills": "./skills/",
   "interface": {

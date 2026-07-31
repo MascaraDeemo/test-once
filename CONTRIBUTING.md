@@ -13,8 +13,16 @@ Contributions are welcome.
    python3 -m unittest discover -s tests -v
    ```
 
-5. Explain the cache-soundness impact in the pull request.
+5. When changing benchmark claims, reproduce them with:
+
+   ```bash
+   python3 benchmarks/run_benchmark.py
+   ```
+
+6. Explain the cache-soundness impact in the pull request.
 
 Keep dependencies minimal. Test Once currently uses only the Python standard library and Git.
+Pillow is an optional development-only dependency used to regenerate
+`assets/demo.gif`; it is not imported by the plugin.
 
 Use GitHub Issues for bug reports, feature proposals, and support questions.

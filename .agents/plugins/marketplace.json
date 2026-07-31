@@ -1,0 +1,21 @@
+{
+  "name": "test-once",
+  "interface": {
+    "displayName": "Test Once"
+  },
+  "plugins": [
+    {
+      "name": "test-once",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/MascaraDeemo/test-once.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

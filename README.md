@@ -1,14 +1,67 @@
 # Test Once
 
-Test Once prevents Codex development, review, and parallel sessions from repeatedly running the same expensive repository-wide test suite.
+[![CI](https://github.com/MascaraDeemo/test-once/actions/workflows/ci.yml/badge.svg)](https://github.com/MascaraDeemo/test-once/actions/workflows/ci.yml)
+[![GitHub release](https://img.shields.io/github/v/release/MascaraDeemo/test-once)](https://github.com/MascaraDeemo/test-once/releases/latest)
+[![License](https://img.shields.io/github/license/MascaraDeemo/test-once)](LICENSE)
 
-For an exact repository snapshot, test command, environment, platform, and toolchain fingerprint, the underlying suite runs at most once at a time. A passing result is then reused by other sessions. Failed runs are never cached.
+**Run an expensive full test suite once per exact source snapshot, then reuse
+the passing result across Codex development, review, and parallel sessions.**
 
-Local aggregate statistics show how many test executions and seconds were avoided without recording source, commands, or environment values.
+![Three Codex sessions reuse one passing full-suite result](assets/demo.gif)
+
+For an exact repository snapshot, test command, environment, platform, and
+toolchain fingerprint, the underlying suite runs at most once at a time.
+Passing results are reused; failures are never cached. Local statistics report
+the avoided runs and time without telemetry.
+
+## Measured result
+
+This controlled benchmark sends three independent requests for the same native
+suite. The test body lasts only one second, so Test Once's fixed lookup costs
+remain visible.
+
+| Suite | Direct ×3 | Test Once ×3 | Underlying runs | Cache hits | Wall time saved |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Go (`go test -count=1 ./...`) | 4.299s | 1.919s | 1 | 2 | 2.380s (55.4%) |
+| TypeScript (`npm test --silent`) | 4.020s | 2.089s | 1 | 2 | 1.930s (48.0%) |
+
+The totals include Python startup, Git source fingerprinting, environment and
+toolchain detection, locking, and cache lookup. Results are the median of three
+trials on macOS arm64. See the
+[methodology and reproducible benchmark](benchmarks/README.md).
+
+For `N` identical requests and a suite duration of `T`, Test Once avoids
+`(N - 1) × T` of test processes. Three sessions requesting a 20-minute suite
+avoid 40 minutes of test execution. The `stats` command reports the lower,
+repository-specific wall-time estimate after lookup and waiting overhead.
+
+## Install in two commands
+
+```bash
+codex plugin marketplace add MascaraDeemo/test-once --ref main
+codex plugin add test-once@test-once
+```
+
+Start a new Codex task after installation. Review and trust the plugin hook
+when Codex prompts you; plugin hooks are never trusted automatically.
+
+Then ask Codex:
+
+```text
+Configure Test Once for this repository's full test suite.
+```
+
+To update later:
+
+```bash
+codex plugin marketplace upgrade test-once
+codex plugin add test-once@test-once
+```
 
 ## Why the key is more than `HEAD`
 
-A commit ID alone is not enough to prove that two test inputs are identical. Test Once also accounts for:
+A commit ID alone is not enough to prove that two test inputs are identical.
+Test Once also accounts for:
 
 - dirty tracked files, staged changes, and untracked files;
 - initialized submodules and sparse-checkout state;
@@ -17,7 +70,8 @@ A commit ID alone is not enough to prove that two test inputs are identical. Tes
 - selected environment variables and relevant default variables;
 - the executable and toolchain version.
 
-Clean Git worktrees that share the same common repository directory and commit share a result. Separate clones remain isolated.
+Clean Git worktrees that share the same common repository directory and commit
+share a result. Separate clones remain isolated.
 
 ## Requirements
 
@@ -26,42 +80,12 @@ Clean Git worktrees that share the same common repository directory and commit s
 - Python 3.10 or newer
 - macOS or Linux
 
-Windows is not supported in the current release; its locking and process-control paths have not been verified.
+Windows is not supported in the current release; its locking and
+process-control paths have not been verified.
 
-The runner is language-agnostic. Go, TypeScript, Rust, Python, Java, Bazel, and other projects work as long as the repository has a deterministic shell command for its full suite.
-
-## Install from source
-
-Until the plugin is accepted into the public Plugins Directory, install it through a personal marketplace:
-
-```bash
-git clone https://github.com/MascaraDeemo/test-once.git ~/plugins/test-once
-```
-
-Add this entry to the `plugins` array in `~/.agents/plugins/marketplace.json`:
-
-```json
-{
-  "name": "test-once",
-  "source": {
-    "source": "local",
-    "path": "./plugins/test-once"
-  },
-  "policy": {
-    "installation": "AVAILABLE",
-    "authentication": "ON_INSTALL"
-  },
-  "category": "Productivity"
-}
-```
-
-Then install it:
-
-```bash
-codex plugin add test-once@personal
-```
-
-Start a new Codex task after installation and review the plugin hook when Codex asks you to trust it.
+The runner is language-agnostic. Go, TypeScript, Rust, Python, Java, Bazel, and
+other projects work as long as the repository has a deterministic shell
+command for its full suite.
 
 ## Configure a repository
 
@@ -148,7 +172,11 @@ Run the integration suite:
 python3 -m unittest discover -s tests -v
 ```
 
-The tests exercise cache reuse, dirty snapshots, clean worktrees, single-flight concurrency, savings statistics, failed and unstable runs, corrupt-stat isolation, environment changes, TypeScript toolchain fingerprints, and hook rewriting.
+The tests exercise cache reuse, dirty snapshots, clean worktrees,
+single-flight concurrency, savings statistics, failed and unstable runs,
+corrupt-stat isolation, environment changes, TypeScript toolchain
+fingerprints, hook rewriting, release-version alignment, marketplace metadata,
+and demo-asset packaging.
 
 ## License
 

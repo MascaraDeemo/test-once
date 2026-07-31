@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 CONFIG_SCHEMA = 1
 CACHE_SCHEMA = 1
 STATS_SCHEMA = 1

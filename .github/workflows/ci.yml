@@ -27,6 +27,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile Python sources
-        run: python -m compileall -q hooks skills tests
+        run: python -m compileall -q hooks skills tests benchmarks
       - name: Run integration tests
         run: python -m unittest discover -s tests -v
