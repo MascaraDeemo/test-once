@@ -1,0 +1,4 @@
+interface:
+  display_name: "Test Once"
+  short_description: "Reuse full-suite test results across Codex sessions"
+  default_prompt: "Use $test-once to run or reuse this repository full test suite safely."

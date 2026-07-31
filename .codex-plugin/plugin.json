@@ -1,0 +1,36 @@
+{
+  "name": "test-once",
+  "version": "0.1.0",
+  "description": "Run an expensive repository-wide test suite once per exact source and environment fingerprint, then reuse the passing result across Codex sessions.",
+  "author": {
+    "name": "MascaraDeemo",
+    "url": "https://github.com/MascaraDeemo"
+  },
+  "homepage": "https://github.com/MascaraDeemo/test-once",
+  "repository": "https://github.com/MascaraDeemo/test-once",
+  "license": "Apache-2.0",
+  "keywords": [
+    "codex",
+    "testing",
+    "unit-tests",
+    "single-flight",
+    "cache"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Test Once",
+    "shortDescription": "Share full-suite test results across sessions.",
+    "longDescription": "Test Once combines lifecycle hooks with a concurrency-safe local cache. Configured full-suite commands are redirected through a single-flight runner, while targeted tests continue to run normally.",
+    "developerName": "MascaraDeemo",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/MascaraDeemo/test-once",
+    "defaultPrompt": [
+      "Configure Test Once for this repository's full test suite.",
+      "Run or reuse the configured full test suite safely."
+    ]
+  }
+}
