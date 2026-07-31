@@ -9,6 +9,7 @@ import datetime as dt
 import glob
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -24,9 +25,10 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 CONFIG_SCHEMA = 1
 CACHE_SCHEMA = 1
+STATS_SCHEMA = 1
 CONFIG_RELATIVE_PATH = Path(".codex") / "test-once.json"
 UNSTABLE_SOURCE_EXIT = 75
 DEFAULT_ENVIRONMENT = (
@@ -587,6 +589,10 @@ def suite_slug(name: str) -> str:
     return f"{readable[:48]}-{hashlib.sha256(name.encode()).hexdigest()[:8]}"
 
 
+def repository_id(repo_common: Path) -> str:
+    return hashlib.sha256(str(repo_common).encode()).hexdigest()
+
+
 def cache_layout(
     repo_common: Path,
     suite_name: str,
@@ -594,7 +600,7 @@ def cache_layout(
     source: dict[str, Any],
     environment_digest: str,
 ) -> dict[str, Any]:
-    repo_id = hashlib.sha256(str(repo_common).encode()).hexdigest()
+    repo_id = repository_id(repo_common)
     key_payload = {
         "cache_schema": CACHE_SCHEMA,
         "repo_id": repo_id,
@@ -617,6 +623,16 @@ def cache_layout(
     }
 
 
+def stats_layout(repo_common: Path) -> dict[str, Any]:
+    repo_id = repository_id(repo_common)
+    repo_dir = cache_root() / "repositories" / repo_id
+    return {
+        "repo_id": repo_id,
+        "stats": repo_dir / "stats.json",
+        "lock": repo_dir / "stats.lock",
+    }
+
+
 def atomic_write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -634,7 +650,7 @@ def atomic_write_json(path: Path, payload: Any) -> None:
 
 
 @contextlib.contextmanager
-def exclusive_lock(path: Path) -> Iterator[None]:
+def exclusive_lock(path: Path, *, announce_wait: bool = True) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = path.open("a+b")
     try:
@@ -648,7 +664,7 @@ def exclusive_lock(path: Path) -> Iterator[None]:
                     msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
                     break
                 except OSError:
-                    if not waited:
+                    if announce_wait and not waited:
                         print(
                             "TEST-ONCE WAIT: another session is running this exact suite key"
                         )
@@ -660,7 +676,10 @@ def exclusive_lock(path: Path) -> Iterator[None]:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                print("TEST-ONCE WAIT: another session is running this exact suite key")
+                if announce_wait:
+                    print(
+                        "TEST-ONCE WAIT: another session is running this exact suite key"
+                    )
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         yield
     finally:
@@ -672,6 +691,186 @@ def exclusive_lock(path: Path) -> Iterator[None]:
             with contextlib.suppress(OSError):
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         handle.close()
+
+
+def empty_suite_stats() -> dict[str, Any]:
+    return {
+        "run_requests": 0,
+        "cache_hits": 0,
+        "executed_runs": 0,
+        "passed_runs": 0,
+        "failed_runs": 0,
+        "unstable_runs": 0,
+        "executed_test_seconds": 0.0,
+        "test_seconds_avoided": 0.0,
+        "hit_resolution_seconds": 0.0,
+        "estimated_wall_seconds_saved": 0.0,
+        "first_event_at": None,
+        "last_event_at": None,
+    }
+
+
+def validate_suite_stats(value: Any, path: Path) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise TestOnceError(f"{path} contains incompatible Test Once statistics")
+    normalized = empty_suite_stats()
+    integer_fields = (
+        "run_requests",
+        "cache_hits",
+        "executed_runs",
+        "passed_runs",
+        "failed_runs",
+        "unstable_runs",
+    )
+    float_fields = (
+        "executed_test_seconds",
+        "test_seconds_avoided",
+        "hit_resolution_seconds",
+        "estimated_wall_seconds_saved",
+    )
+    for field in integer_fields:
+        raw = value.get(field)
+        if (
+            not isinstance(raw, int)
+            or isinstance(raw, bool)
+            or raw < 0
+        ):
+            raise TestOnceError(
+                f"{path} contains incompatible Test Once statistics"
+            )
+        normalized[field] = raw
+    for field in float_fields:
+        raw = value.get(field)
+        if (
+            not isinstance(raw, (int, float))
+            or isinstance(raw, bool)
+            or not math.isfinite(float(raw))
+            or raw < 0
+        ):
+            raise TestOnceError(
+                f"{path} contains incompatible Test Once statistics"
+            )
+        normalized[field] = float(raw)
+    for field in ("first_event_at", "last_event_at"):
+        raw = value.get(field)
+        if raw is not None and not isinstance(raw, str):
+            raise TestOnceError(
+                f"{path} contains incompatible Test Once statistics"
+            )
+        normalized[field] = raw
+    if (
+        normalized["run_requests"]
+        != normalized["cache_hits"] + normalized["executed_runs"]
+        or normalized["executed_runs"]
+        != normalized["passed_runs"]
+        + normalized["failed_runs"]
+        + normalized["unstable_runs"]
+    ):
+        raise TestOnceError(f"{path} contains incompatible Test Once statistics")
+    return normalized
+
+
+def load_stats(path: Path, repo_id: str) -> dict[str, Any]:
+    if not path.exists():
+        return {
+            "stats_schema": STATS_SCHEMA,
+            "repo_id": repo_id,
+            "updated_at": None,
+            "suites": {},
+        }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise TestOnceError(f"Cannot read stats from {path}: {exc}") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("stats_schema") != STATS_SCHEMA
+        or payload.get("repo_id") != repo_id
+        or not isinstance(payload.get("suites"), dict)
+        or (
+            payload.get("updated_at") is not None
+            and not isinstance(payload.get("updated_at"), str)
+        )
+    ):
+        raise TestOnceError(f"{path} contains incompatible Test Once statistics")
+    normalized_suites: dict[str, Any] = {}
+    for suite_name, raw in payload["suites"].items():
+        if not isinstance(suite_name, str) or not suite_name:
+            raise TestOnceError(
+                f"{path} contains incompatible Test Once statistics"
+            )
+        normalized_suites[suite_name] = validate_suite_stats(raw, path)
+    return {
+        "stats_schema": STATS_SCHEMA,
+        "repo_id": repo_id,
+        "updated_at": payload.get("updated_at"),
+        "suites": normalized_suites,
+    }
+
+
+def record_stats_event(
+    repo_common: Path,
+    suite_name: str,
+    event: str,
+    *,
+    duration_seconds: float = 0.0,
+    original_duration_seconds: float = 0.0,
+    hit_resolution_seconds: float = 0.0,
+) -> None:
+    layout = stats_layout(repo_common)
+    try:
+        with exclusive_lock(layout["lock"], announce_wait=False):
+            payload = load_stats(layout["stats"], layout["repo_id"])
+            suites = payload["suites"]
+            current = dict(suites.get(suite_name, empty_suite_stats()))
+            now = dt.datetime.now(dt.timezone.utc).isoformat()
+            if current["first_event_at"] is None:
+                current["first_event_at"] = now
+            current["last_event_at"] = now
+            current["run_requests"] += 1
+            if event == "hit":
+                current["cache_hits"] += 1
+                current["test_seconds_avoided"] += max(
+                    float(original_duration_seconds), 0.0
+                )
+                current["hit_resolution_seconds"] += max(
+                    float(hit_resolution_seconds), 0.0
+                )
+                current["estimated_wall_seconds_saved"] += max(
+                    float(original_duration_seconds)
+                    - float(hit_resolution_seconds),
+                    0.0,
+                )
+            elif event in {"passed", "failed", "unstable"}:
+                current["executed_runs"] += 1
+                current["executed_test_seconds"] += max(
+                    float(duration_seconds), 0.0
+                )
+                current[f"{event}_runs"] += 1
+            else:
+                raise TestOnceError(f"Unsupported statistics event: {event}")
+            suites[suite_name] = current
+            payload["updated_at"] = now
+            atomic_write_json(layout["stats"], payload)
+    except (OSError, TestOnceError) as exc:
+        print(f"test-once: warning: could not record statistics: {exc}", file=sys.stderr)
+
+
+def stats_payload(repo_common: Path, suite_name: str) -> dict[str, Any]:
+    layout = stats_layout(repo_common)
+    stored = load_stats(layout["stats"], layout["repo_id"])
+    current = dict(stored["suites"].get(suite_name, empty_suite_stats()))
+    run_requests = int(current["run_requests"])
+    cache_hits = int(current["cache_hits"])
+    return {
+        "stats_schema": STATS_SCHEMA,
+        "repo_id": layout["repo_id"],
+        "suite": suite_name,
+        **current,
+        "runs_avoided": cache_hits,
+        "cache_hit_rate": cache_hits / run_requests if run_requests else 0.0,
+        "stats_path": str(layout["stats"]),
+    }
 
 
 def read_result(path: Path, suite: dict[str, Any]) -> dict[str, Any] | None:
@@ -784,6 +983,7 @@ def current_identity(
 
 
 def command_run(args: argparse.Namespace) -> int:
+    request_started = time.monotonic()
     repo, common = discover_repo(args.repo or Path.cwd())
     command_override = args.command
     if args.remainder:
@@ -807,6 +1007,13 @@ def command_run(args: argparse.Namespace) -> int:
         if cached is not None:
             after = source_identity(repo, suite)
             if after["fingerprint"] == source["fingerprint"]:
+                record_stats_event(
+                    common,
+                    args.suite,
+                    "hit",
+                    original_duration_seconds=float(cached["duration_seconds"]),
+                    hit_resolution_seconds=time.monotonic() - request_started,
+                )
                 print_hit(cached, layout["result"], show_log=args.show_log)
                 return 0
             continue
@@ -817,6 +1024,13 @@ def command_run(args: argparse.Namespace) -> int:
                 continue
             cached = read_result(layout["result"], suite)
             if cached is not None:
+                record_stats_event(
+                    common,
+                    args.suite,
+                    "hit",
+                    original_duration_seconds=float(cached["duration_seconds"]),
+                    hit_resolution_seconds=time.monotonic() - request_started,
+                )
                 print_hit(cached, layout["result"], show_log=args.show_log)
                 return 0
 
@@ -839,6 +1053,12 @@ def command_run(args: argparse.Namespace) -> int:
             try:
                 exit_code, duration = stream_test(suite["command"], repo, temp_log)
                 if exit_code != 0:
+                    record_stats_event(
+                        common,
+                        args.suite,
+                        "failed",
+                        duration_seconds=duration,
+                    )
                     print(
                         f"TEST-ONCE NOT STORED: test command exited {exit_code}; "
                         "failures are never reused."
@@ -846,6 +1066,12 @@ def command_run(args: argparse.Namespace) -> int:
                     return exit_code
                 final_source = source_identity(repo, suite)
                 if final_source["fingerprint"] != locked_source["fingerprint"]:
+                    record_stats_event(
+                        common,
+                        args.suite,
+                        "unstable",
+                        duration_seconds=duration,
+                    )
                     print(
                         "TEST-ONCE NOT STORED: repository source changed while tests "
                         f"were running (exit {UNSTABLE_SOURCE_EXIT}).",
@@ -877,6 +1103,12 @@ def command_run(args: argparse.Namespace) -> int:
                     "log_file": "output.log",
                 }
                 atomic_write_json(layout["result"], record)
+                record_stats_event(
+                    common,
+                    args.suite,
+                    "passed",
+                    duration_seconds=duration,
+                )
                 print("TEST-ONCE STORED: PASS")
                 print(f"key: {layout['key']}")
                 print(f"log: {layout['log']}")
@@ -967,6 +1199,32 @@ def command_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_stats(args: argparse.Namespace) -> int:
+    _, common = discover_repo(args.repo or Path.cwd())
+    payload = stats_payload(common, args.suite)
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    print("TEST-ONCE STATS")
+    print(f"suite: {payload['suite']}")
+    print(f"run_requests: {payload['run_requests']}")
+    print(f"executed_runs: {payload['executed_runs']}")
+    print(f"cache_hits: {payload['cache_hits']}")
+    print(f"cache_hit_rate: {payload['cache_hit_rate']:.1%}")
+    print(f"runs_avoided: {payload['runs_avoided']}")
+    print(f"executed_test_seconds: {payload['executed_test_seconds']:.3f}")
+    print(f"test_seconds_avoided: {payload['test_seconds_avoided']:.3f}")
+    print(
+        "estimated_wall_seconds_saved: "
+        f"{payload['estimated_wall_seconds_saved']:.3f}"
+    )
+    print(f"hit_resolution_seconds: {payload['hit_resolution_seconds']:.3f}")
+    print(f"first_event_at: {payload['first_event_at'] or 'none'}")
+    print(f"last_event_at: {payload['last_event_at'] or 'none'}")
+    print(f"stats: {payload['stats_path']}")
+    return 0
+
+
 def command_invalidate(args: argparse.Namespace) -> int:
     payload, layout = status_payload(args)
     entry: Path = layout["entry"]
@@ -1028,6 +1286,13 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--json", action="store_true")
     status_parser.add_argument("--show-log", action="store_true")
     status_parser.set_defaults(handler=command_status)
+
+    stats_parser = subparsers.add_parser(
+        "stats", help="Show locally aggregated run and savings statistics"
+    )
+    stats_parser.add_argument("--suite", default="full-ut")
+    stats_parser.add_argument("--json", action="store_true")
+    stats_parser.set_defaults(handler=command_stats)
 
     invalidate_parser = subparsers.add_parser(
         "invalidate", help="Move the current key's result into cache trash"

@@ -69,7 +69,10 @@ This shares the result but cannot enable automatic hook rewriting until the repo
 
 ```bash
 python3 <skill-dir>/scripts/test_once.py status --suite full-ut --json
+python3 <skill-dir>/scripts/test_once.py stats --suite full-ut --json
 python3 <skill-dir>/scripts/test_once.py invalidate --suite full-ut
 ```
+
+`stats` reports local aggregate run requests, cache hits, avoided test executions, avoided test duration, and estimated wall time saved. It does not count `status` checks.
 
 `invalidate` moves only the current key's result into the cache trash directory so it remains recoverable.

@@ -73,6 +73,8 @@ class TestOnceIntegrationTest(unittest.TestCase):
                 count = int(counter.read_text() or "0") if counter.exists() else 0
                 counter.write_text(str(count + 1))
                 print(f"underlying-run={count + 1}", flush=True)
+                if mutation := os.environ.get("RUNNER_MUTATE"):
+                    Path(mutation).write_text("changed during test\\n")
                 time.sleep(float(os.environ.get("RUNNER_SLEEP", "0")))
                 raise SystemExit(int(os.environ.get("RUNNER_EXIT", "0")))
                 """
@@ -94,6 +96,8 @@ class TestOnceIntegrationTest(unittest.TestCase):
             "RUNNER_SLEEP",
             "--env",
             "RUNNER_EXIT",
+            "--env",
+            "RUNNER_MUTATE",
         )
         self.git(repo, "add", ".codex/test-once.json")
         self.git(repo, "commit", "-qm", "configure test once")
@@ -125,6 +129,40 @@ class TestOnceIntegrationTest(unittest.TestCase):
         seventh = self.command(repo, "run")
         self.assertIn("TEST-ONCE STORED: PASS", seventh.stdout)
         self.assertEqual(counter.read_text(), "4")
+
+    def test_stats_reports_executed_and_avoided_test_work(self) -> None:
+        repo, counter, _ = self.make_repo("stats")
+        env = {"RUNNER_EXIT": "0", "RUNNER_SLEEP": "0.2"}
+
+        first = self.command(repo, "run", env=env)
+        second = self.command(repo, "run", env=env)
+        self.command(repo, "status", "--json", env=env)
+        stats = self.command(repo, "stats", "--json", env=env)
+        payload = json.loads(stats.stdout)
+
+        self.assertIn("TEST-ONCE STORED: PASS", first.stdout)
+        self.assertIn("TEST-ONCE HIT: PASS", second.stdout)
+        self.assertEqual(counter.read_text(), "1")
+        self.assertEqual(payload["suite"], "full-ut")
+        self.assertEqual(payload["run_requests"], 2)
+        self.assertEqual(payload["executed_runs"], 1)
+        self.assertEqual(payload["passed_runs"], 1)
+        self.assertEqual(payload["failed_runs"], 0)
+        self.assertEqual(payload["unstable_runs"], 0)
+        self.assertEqual(payload["cache_hits"], 1)
+        self.assertEqual(payload["runs_avoided"], 1)
+        self.assertEqual(payload["cache_hit_rate"], 0.5)
+        self.assertGreaterEqual(payload["executed_test_seconds"], 0.15)
+        self.assertGreaterEqual(payload["test_seconds_avoided"], 0.15)
+        self.assertGreater(payload["estimated_wall_seconds_saved"], 0)
+        self.assertGreaterEqual(payload["hit_resolution_seconds"], 0)
+        self.assertIsInstance(payload["first_event_at"], str)
+        self.assertIsInstance(payload["last_event_at"], str)
+        self.assertTrue(payload["stats_path"].endswith("stats.json"))
+        human = self.command(repo, "stats", env=env).stdout
+        self.assertIn("TEST-ONCE STATS", human)
+        self.assertIn("runs_avoided: 1", human)
+        self.assertIn("cache_hit_rate: 50.0%", human)
 
     def test_concurrent_sessions_execute_underlying_command_once(self) -> None:
         repo, counter, _ = self.make_repo("concurrent")
@@ -160,6 +198,19 @@ class TestOnceIntegrationTest(unittest.TestCase):
         self.assertIn("TEST-ONCE STORED: PASS", first_output + second_output)
         self.assertIn("TEST-ONCE HIT: PASS", first_output + second_output)
         self.assertIn("TEST-ONCE WAIT:", first_output + second_output)
+        stats = json.loads(
+            self.command(
+                repo,
+                "stats",
+                "--json",
+                env={"RUNNER_SLEEP": "0.8", "RUNNER_EXIT": "0"},
+            ).stdout
+        )
+        self.assertEqual(stats["run_requests"], 2)
+        self.assertEqual(stats["executed_runs"], 1)
+        self.assertEqual(stats["passed_runs"], 1)
+        self.assertEqual(stats["cache_hits"], 1)
+        self.assertEqual(stats["runs_avoided"], 1)
 
     def test_clean_worktrees_share_the_same_commit_result(self) -> None:
         repo, counter, _ = self.make_repo("worktrees")
@@ -267,6 +318,72 @@ class TestOnceIntegrationTest(unittest.TestCase):
         self.assertEqual(counter.read_text(), "2")
         self.assertIn("failures are never reused", first.stdout)
         self.assertNotIn("TEST-ONCE HIT", first.stdout + second.stdout)
+        stats = json.loads(self.command(repo, "stats", "--json", env=env).stdout)
+        self.assertEqual(stats["run_requests"], 2)
+        self.assertEqual(stats["executed_runs"], 2)
+        self.assertEqual(stats["failed_runs"], 2)
+        self.assertEqual(stats["passed_runs"], 0)
+        self.assertEqual(stats["cache_hits"], 0)
+
+    def test_source_change_during_run_is_counted_as_unstable(self) -> None:
+        repo, counter, _ = self.make_repo("unstable")
+        env = {
+            "RUNNER_EXIT": "0",
+            "RUNNER_SLEEP": "0",
+            "RUNNER_MUTATE": str(repo / "tracked.txt"),
+        }
+
+        result = self.command(repo, "run", env=env, check=False)
+        stats = json.loads(self.command(repo, "stats", "--json", env=env).stdout)
+
+        self.assertEqual(result.returncode, 75, result.stdout)
+        self.assertIn("repository source changed", result.stdout)
+        self.assertEqual(counter.read_text(), "1")
+        self.assertEqual(stats["run_requests"], 1)
+        self.assertEqual(stats["executed_runs"], 1)
+        self.assertEqual(stats["unstable_runs"], 1)
+        self.assertEqual(stats["passed_runs"], 0)
+        self.assertEqual(stats["cache_hits"], 0)
+
+    def test_corrupt_stats_never_breaks_cached_test_result(self) -> None:
+        repo, counter, _ = self.make_repo("corrupt-stats")
+        first = self.command(repo, "run")
+        current = json.loads(self.command(repo, "stats", "--json").stdout)
+        Path(current["stats_path"]).write_text(
+            json.dumps(
+                {
+                    "stats_schema": current["stats_schema"],
+                    "repo_id": current["repo_id"],
+                    "updated_at": None,
+                    "suites": {"full-ut": {}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        second = self.command(repo, "run")
+        stats = self.command(repo, "stats", "--json", check=False)
+
+        self.assertIn("TEST-ONCE STORED: PASS", first.stdout)
+        self.assertIn("TEST-ONCE HIT: PASS", second.stdout)
+        self.assertIn("could not record statistics", second.stdout)
+        self.assertEqual(counter.read_text(), "1")
+        self.assertEqual(stats.returncode, 2)
+        self.assertIn("incompatible Test Once statistics", stats.stdout)
+
+    def test_non_finite_stats_are_rejected(self) -> None:
+        repo, _, _ = self.make_repo("non-finite-stats")
+        self.command(repo, "run")
+        current = json.loads(self.command(repo, "stats", "--json").stdout)
+        stats_path = Path(current["stats_path"])
+        stored = json.loads(stats_path.read_text(encoding="utf-8"))
+        stored["suites"]["full-ut"]["executed_test_seconds"] = float("nan")
+        stats_path.write_text(json.dumps(stored), encoding="utf-8")
+
+        stats = self.command(repo, "stats", "--json", check=False)
+
+        self.assertEqual(stats.returncode, 2)
+        self.assertIn("incompatible Test Once statistics", stats.stdout)
 
     def test_hook_injects_policy_and_rewrites_only_exact_suite(self) -> None:
         repo, _, test_command = self.make_repo("hook")

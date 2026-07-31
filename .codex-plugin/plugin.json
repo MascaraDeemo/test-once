@@ -1,7 +1,7 @@
 {
   "name": "test-once",
-  "version": "0.1.0",
-  "description": "Run an expensive repository-wide test suite once per exact source and environment fingerprint, then reuse the passing result across Codex sessions.",
+  "version": "0.2.0",
+  "description": "Stop duplicate expensive full-suite runs across Codex sessions, safely reuse exact passing results, and report avoided runs and time.",
   "author": {
     "name": "MascaraDeemo",
     "url": "https://github.com/MascaraDeemo"
@@ -19,8 +19,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Test Once",
-    "shortDescription": "Share full-suite test results across sessions.",
-    "longDescription": "Test Once combines lifecycle hooks with a concurrency-safe local cache. Configured full-suite commands are redirected through a single-flight runner, while targeted tests continue to run normally.",
+    "shortDescription": "Run full test suites once and see time saved.",
+    "longDescription": "Stop development, review, and parallel Codex sessions from rerunning the same expensive full suite. Test Once reuses only passing results matched by exact source, command, environment, platform, and toolchain fingerprints; single-flight locking collapses concurrent runs; focused tests stay untouched; and local statistics show avoided runs and test time. It works with Go, TypeScript, and any shell-driven test suite without telemetry.",
     "developerName": "MascaraDeemo",
     "category": "Productivity",
     "capabilities": [
@@ -30,7 +30,8 @@
     "websiteURL": "https://github.com/MascaraDeemo/test-once",
     "defaultPrompt": [
       "Configure Test Once for this repository's full test suite.",
-      "Run or reuse the configured full test suite safely."
+      "Run or reuse the configured full test suite safely.",
+      "Show how many full-suite runs and seconds Test Once has saved."
     ]
   }
 }
