@@ -73,6 +73,14 @@ python3 <skill-dir>/scripts/test_once.py stats --suite full-ut --json
 python3 <skill-dir>/scripts/test_once.py invalidate --suite full-ut
 ```
 
-`stats` reports local aggregate run requests, cache hits, avoided test executions, avoided test duration, and estimated wall time saved. It does not count `status` checks.
+`stats` reports local aggregate run requests, cache hits, and avoided test executions. `nominal_test_seconds_avoided` is the sum of original passing-run durations and is test-work accounting, not a wall-time claim. `calibrated_wall_seconds_saved` is unavailable until the current exact result has an explicit warm baseline; schema-1 statistics migrate as uncalibrated history.
+
+To measure native runner caches for the current exact result, explicitly rerun the full suite once:
+
+```bash
+python3 <skill-dir>/scripts/test_once.py calibrate --suite full-ut
+```
+
+`calibrate` requires an existing reusable pass, intentionally starts the full test command once, and stores its warm duration only if it passes without a source change. It is optional measurement work, not required for reuse. Subsequent hits report calibrated wall-time savings while earlier or uncalibrated hits remain clearly separated.
 
 `invalidate` moves only the current key's result into the cache trash directory so it remains recoverable.

@@ -25,10 +25,10 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 CONFIG_SCHEMA = 1
 CACHE_SCHEMA = 1
-STATS_SCHEMA = 1
+STATS_SCHEMA = 2
 CONFIG_RELATIVE_PATH = Path(".codex") / "test-once.json"
 UNSTABLE_SOURCE_EXIT = 75
 DEFAULT_ENVIRONMENT = (
@@ -701,10 +701,13 @@ def empty_suite_stats() -> dict[str, Any]:
         "passed_runs": 0,
         "failed_runs": 0,
         "unstable_runs": 0,
+        "calibrated_cache_hits": 0,
+        "uncalibrated_cache_hits": 0,
         "executed_test_seconds": 0.0,
-        "test_seconds_avoided": 0.0,
+        "nominal_test_seconds_avoided": 0.0,
         "hit_resolution_seconds": 0.0,
-        "estimated_wall_seconds_saved": 0.0,
+        "calibrated_warm_seconds_avoided": 0.0,
+        "calibrated_wall_seconds_saved": 0.0,
         "first_event_at": None,
         "last_event_at": None,
     }
@@ -721,12 +724,15 @@ def validate_suite_stats(value: Any, path: Path) -> dict[str, Any]:
         "passed_runs",
         "failed_runs",
         "unstable_runs",
+        "calibrated_cache_hits",
+        "uncalibrated_cache_hits",
     )
     float_fields = (
         "executed_test_seconds",
-        "test_seconds_avoided",
+        "nominal_test_seconds_avoided",
         "hit_resolution_seconds",
-        "estimated_wall_seconds_saved",
+        "calibrated_warm_seconds_avoided",
+        "calibrated_wall_seconds_saved",
     )
     for field in integer_fields:
         raw = value.get(field)
@@ -765,9 +771,79 @@ def validate_suite_stats(value: Any, path: Path) -> dict[str, Any]:
         != normalized["passed_runs"]
         + normalized["failed_runs"]
         + normalized["unstable_runs"]
+        or normalized["cache_hits"]
+        != normalized["calibrated_cache_hits"]
+        + normalized["uncalibrated_cache_hits"]
     ):
         raise TestOnceError(f"{path} contains incompatible Test Once statistics")
     return normalized
+
+
+def migrate_v1_suite_stats(value: Any, path: Path) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise TestOnceError(f"{path} contains incompatible Test Once statistics")
+    migrated = empty_suite_stats()
+    integer_fields = (
+        "run_requests",
+        "cache_hits",
+        "executed_runs",
+        "passed_runs",
+        "failed_runs",
+        "unstable_runs",
+    )
+    float_fields = (
+        "executed_test_seconds",
+        "test_seconds_avoided",
+        "hit_resolution_seconds",
+        "estimated_wall_seconds_saved",
+    )
+    for field in integer_fields:
+        raw = value.get(field)
+        if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
+            raise TestOnceError(
+                f"{path} contains incompatible Test Once statistics"
+            )
+        migrated[field] = raw
+    validated_floats: dict[str, float] = {}
+    for field in float_fields:
+        raw = value.get(field)
+        if (
+            not isinstance(raw, (int, float))
+            or isinstance(raw, bool)
+            or not math.isfinite(float(raw))
+            or raw < 0
+        ):
+            raise TestOnceError(
+                f"{path} contains incompatible Test Once statistics"
+            )
+        validated_floats[field] = float(raw)
+    for field in ("first_event_at", "last_event_at"):
+        raw = value.get(field)
+        if raw is not None and not isinstance(raw, str):
+            raise TestOnceError(
+                f"{path} contains incompatible Test Once statistics"
+            )
+        migrated[field] = raw
+    if (
+        migrated["run_requests"]
+        != migrated["cache_hits"] + migrated["executed_runs"]
+        or migrated["executed_runs"]
+        != migrated["passed_runs"]
+        + migrated["failed_runs"]
+        + migrated["unstable_runs"]
+    ):
+        raise TestOnceError(f"{path} contains incompatible Test Once statistics")
+    migrated["executed_test_seconds"] = validated_floats[
+        "executed_test_seconds"
+    ]
+    migrated["nominal_test_seconds_avoided"] = validated_floats[
+        "test_seconds_avoided"
+    ]
+    migrated["hit_resolution_seconds"] = validated_floats[
+        "hit_resolution_seconds"
+    ]
+    migrated["uncalibrated_cache_hits"] = migrated["cache_hits"]
+    return migrated
 
 
 def load_stats(path: Path, repo_id: str) -> dict[str, Any]:
@@ -782,9 +858,12 @@ def load_stats(path: Path, repo_id: str) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise TestOnceError(f"Cannot read stats from {path}: {exc}") from exc
+    stored_schema = (
+        payload.get("stats_schema") if isinstance(payload, dict) else None
+    )
     if (
         not isinstance(payload, dict)
-        or payload.get("stats_schema") != STATS_SCHEMA
+        or stored_schema not in {1, STATS_SCHEMA}
         or payload.get("repo_id") != repo_id
         or not isinstance(payload.get("suites"), dict)
         or (
@@ -799,7 +878,11 @@ def load_stats(path: Path, repo_id: str) -> dict[str, Any]:
             raise TestOnceError(
                 f"{path} contains incompatible Test Once statistics"
             )
-        normalized_suites[suite_name] = validate_suite_stats(raw, path)
+        normalized_suites[suite_name] = (
+            migrate_v1_suite_stats(raw, path)
+            if stored_schema == 1
+            else validate_suite_stats(raw, path)
+        )
     return {
         "stats_schema": STATS_SCHEMA,
         "repo_id": repo_id,
@@ -816,6 +899,7 @@ def record_stats_event(
     duration_seconds: float = 0.0,
     original_duration_seconds: float = 0.0,
     hit_resolution_seconds: float = 0.0,
+    warm_baseline_seconds: float | None = None,
 ) -> None:
     layout = stats_layout(repo_common)
     try:
@@ -830,17 +914,21 @@ def record_stats_event(
             current["run_requests"] += 1
             if event == "hit":
                 current["cache_hits"] += 1
-                current["test_seconds_avoided"] += max(
+                current["nominal_test_seconds_avoided"] += max(
                     float(original_duration_seconds), 0.0
                 )
                 current["hit_resolution_seconds"] += max(
                     float(hit_resolution_seconds), 0.0
                 )
-                current["estimated_wall_seconds_saved"] += max(
-                    float(original_duration_seconds)
-                    - float(hit_resolution_seconds),
-                    0.0,
-                )
+                if warm_baseline_seconds is None:
+                    current["uncalibrated_cache_hits"] += 1
+                else:
+                    warm_seconds = max(float(warm_baseline_seconds), 0.0)
+                    current["calibrated_cache_hits"] += 1
+                    current["calibrated_warm_seconds_avoided"] += warm_seconds
+                    current["calibrated_wall_seconds_saved"] += max(
+                        warm_seconds - float(hit_resolution_seconds), 0.0
+                    )
             elif event in {"passed", "failed", "unstable"}:
                 current["executed_runs"] += 1
                 current["executed_test_seconds"] += max(
@@ -862,6 +950,7 @@ def stats_payload(repo_common: Path, suite_name: str) -> dict[str, Any]:
     current = dict(stored["suites"].get(suite_name, empty_suite_stats()))
     run_requests = int(current["run_requests"])
     cache_hits = int(current["cache_hits"])
+    calibrated_cache_hits = int(current["calibrated_cache_hits"])
     return {
         "stats_schema": STATS_SCHEMA,
         "repo_id": layout["repo_id"],
@@ -869,6 +958,14 @@ def stats_payload(repo_common: Path, suite_name: str) -> dict[str, Any]:
         **current,
         "runs_avoided": cache_hits,
         "cache_hit_rate": cache_hits / run_requests if run_requests else 0.0,
+        "calibration_coverage": (
+            calibrated_cache_hits / cache_hits if cache_hits else 0.0
+        ),
+        "calibrated_wall_seconds_saved": (
+            current["calibrated_wall_seconds_saved"]
+            if calibrated_cache_hits
+            else None
+        ),
         "stats_path": str(layout["stats"]),
     }
 
@@ -898,6 +995,26 @@ def read_result(path: Path, suite: dict[str, Any]) -> dict[str, Any] | None:
         if not isinstance(finished, (int, float)) or time.time() - finished > ttl:
             return None
     return result
+
+
+def warm_baseline_seconds(result: dict[str, Any]) -> float | None:
+    baseline = result.get("warm_baseline")
+    if not isinstance(baseline, dict):
+        return None
+    duration = baseline.get("duration_seconds")
+    source = result.get("source")
+    if (
+        not isinstance(duration, (int, float))
+        or isinstance(duration, bool)
+        or not math.isfinite(float(duration))
+        or duration < 0
+        or not isinstance(source, dict)
+        or baseline.get("source_fingerprint") != source.get("fingerprint")
+        or not isinstance(baseline.get("recorded_at"), str)
+        or not isinstance(baseline.get("log_file"), str)
+    ):
+        return None
+    return float(duration)
 
 
 def print_hit(result: dict[str, Any], result_path: Path, *, show_log: bool) -> None:
@@ -1013,6 +1130,7 @@ def command_run(args: argparse.Namespace) -> int:
                     "hit",
                     original_duration_seconds=float(cached["duration_seconds"]),
                     hit_resolution_seconds=time.monotonic() - request_started,
+                    warm_baseline_seconds=warm_baseline_seconds(cached),
                 )
                 print_hit(cached, layout["result"], show_log=args.show_log)
                 return 0
@@ -1030,6 +1148,7 @@ def command_run(args: argparse.Namespace) -> int:
                     "hit",
                     original_duration_seconds=float(cached["duration_seconds"]),
                     hit_resolution_seconds=time.monotonic() - request_started,
+                    warm_baseline_seconds=warm_baseline_seconds(cached),
                 )
                 print_hit(cached, layout["result"], show_log=args.show_log)
                 return 0
@@ -1157,6 +1276,72 @@ def command_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_calibrate(args: argparse.Namespace) -> int:
+    repo, common = discover_repo(args.repo or Path.cwd())
+    suite, _ = resolve_suite(repo, args.suite, args.command)
+    source, _, _, layout = current_identity(repo, common, args.suite, suite)
+    with exclusive_lock(layout["lock"]):
+        locked_source = source_identity(repo, suite)
+        if locked_source["fingerprint"] != source["fingerprint"]:
+            raise TestOnceError(
+                "Repository source changed before calibration; retry when stable"
+            )
+        cached = read_result(layout["result"], suite)
+        if cached is None:
+            raise TestOnceError(
+                "Calibration requires a reusable passing result for the current key; "
+                "run the suite once first"
+            )
+        layout["suite_dir"].mkdir(parents=True, exist_ok=True)
+        fd, raw_log = tempfile.mkstemp(
+            prefix=f".{layout['key']}.",
+            suffix=".calibration.log.tmp",
+            dir=layout["suite_dir"],
+        )
+        os.close(fd)
+        temp_log = Path(raw_log)
+        print("TEST-ONCE CALIBRATION: intentionally rerunning the full suite once")
+        print(f"suite: {args.suite}")
+        print(f"key: {layout['key']}")
+        print(f"source: {source['fingerprint']}")
+        print(f"command: {suite['command']}")
+        sys.stdout.flush()
+        try:
+            exit_code, duration = stream_test(suite["command"], repo, temp_log)
+            if exit_code != 0:
+                print(
+                    "TEST-ONCE CALIBRATION NOT STORED: "
+                    f"test command exited {exit_code}"
+                )
+                return exit_code
+            final_source = source_identity(repo, suite)
+            if final_source["fingerprint"] != locked_source["fingerprint"]:
+                print(
+                    "TEST-ONCE CALIBRATION NOT STORED: repository source changed "
+                    f"while tests were running (exit {UNSTABLE_SOURCE_EXIT}).",
+                    file=sys.stderr,
+                )
+                return UNSTABLE_SOURCE_EXIT
+            calibration_log = layout["entry"] / "warm-baseline.log"
+            os.replace(temp_log, calibration_log)
+            recorded_at = dt.datetime.now(dt.timezone.utc).isoformat()
+            updated = dict(cached)
+            updated["warm_baseline"] = {
+                "duration_seconds": duration,
+                "recorded_at": recorded_at,
+                "source_fingerprint": locked_source["fingerprint"],
+                "log_file": calibration_log.name,
+            }
+            atomic_write_json(layout["result"], updated)
+            print("TEST-ONCE CALIBRATED")
+            print(f"warm_baseline_duration_seconds: {duration:.3f}")
+            print(f"log: {calibration_log}")
+            return 0
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                temp_log.unlink()
+
+
 def command_init(args: argparse.Namespace) -> int:
     repo, _ = discover_repo(args.repo or Path.cwd())
     path = repo / CONFIG_RELATIVE_PATH
@@ -1213,11 +1398,24 @@ def command_stats(args: argparse.Namespace) -> int:
     print(f"cache_hit_rate: {payload['cache_hit_rate']:.1%}")
     print(f"runs_avoided: {payload['runs_avoided']}")
     print(f"executed_test_seconds: {payload['executed_test_seconds']:.3f}")
-    print(f"test_seconds_avoided: {payload['test_seconds_avoided']:.3f}")
     print(
-        "estimated_wall_seconds_saved: "
-        f"{payload['estimated_wall_seconds_saved']:.3f}"
+        "nominal_test_seconds_avoided: "
+        f"{payload['nominal_test_seconds_avoided']:.3f}"
     )
+    print(f"calibrated_cache_hits: {payload['calibrated_cache_hits']}")
+    print(f"uncalibrated_cache_hits: {payload['uncalibrated_cache_hits']}")
+    print(
+        "calibrated_warm_seconds_avoided: "
+        f"{payload['calibrated_warm_seconds_avoided']:.3f}"
+    )
+    calibrated_saved = payload["calibrated_wall_seconds_saved"]
+    calibrated_saved_text = (
+        f"{calibrated_saved:.3f}"
+        if calibrated_saved is not None
+        else "unavailable"
+    )
+    print(f"calibrated_wall_seconds_saved: {calibrated_saved_text}")
+    print(f"calibration_coverage: {payload['calibration_coverage']:.1%}")
     print(f"hit_resolution_seconds: {payload['hit_resolution_seconds']:.3f}")
     print(f"first_event_at: {payload['first_event_at'] or 'none'}")
     print(f"last_event_at: {payload['last_event_at'] or 'none'}")
@@ -1286,6 +1484,14 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--json", action="store_true")
     status_parser.add_argument("--show-log", action="store_true")
     status_parser.set_defaults(handler=command_status)
+
+    calibrate_parser = subparsers.add_parser(
+        "calibrate",
+        help="Intentionally rerun a passing suite once to measure its warm baseline",
+    )
+    calibrate_parser.add_argument("--suite", default="full-ut")
+    calibrate_parser.add_argument("--command")
+    calibrate_parser.set_defaults(handler=command_calibrate)
 
     stats_parser = subparsers.add_parser(
         "stats", help="Show locally aggregated run and savings statistics"

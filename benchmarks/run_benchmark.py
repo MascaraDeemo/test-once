@@ -222,7 +222,7 @@ def benchmark_trial(
             "executed_runs": stats["executed_runs"],
             "cache_hits": stats["cache_hits"],
             "runs_avoided": stats["runs_avoided"],
-            "estimated_wall_seconds_saved": stats["estimated_wall_seconds_saved"],
+            "nominal_test_seconds_avoided": stats["nominal_test_seconds_avoided"],
         }
 
 

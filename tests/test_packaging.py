@@ -11,6 +11,9 @@ MANIFEST = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 MARKETPLACE = PLUGIN_ROOT / ".agents" / "plugins" / "marketplace.json"
 RUNNER = PLUGIN_ROOT / "skills" / "test-once" / "scripts" / "test_once.py"
 README = PLUGIN_ROOT / "README.md"
+SKILL = PLUGIN_ROOT / "skills" / "test-once" / "SKILL.md"
+BENCHMARK = PLUGIN_ROOT / "benchmarks" / "run_benchmark.py"
+REAL_WORLD = PLUGIN_ROOT / "benchmarks" / "real-world.md"
 DEMO = PLUGIN_ROOT / "assets" / "demo.gif"
 
 
@@ -48,6 +51,22 @@ class PackagingTest(unittest.TestCase):
             readme,
         )
         self.assertIn("codex plugin add test-once@test-once", readme)
+
+    def test_public_docs_use_calibrated_savings_semantics(self) -> None:
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        readme = README.read_text(encoding="utf-8")
+        skill = SKILL.read_text(encoding="utf-8")
+        benchmark = BENCHMARK.read_text(encoding="utf-8")
+        case_study = REAL_WORLD.read_text(encoding="utf-8")
+
+        self.assertIn("warm-calibrated", manifest["description"])
+        for public_text in (readme, skill, benchmark):
+            self.assertNotIn("estimated_wall_seconds_saved", public_text)
+        self.assertIn("calibrated_wall_seconds_saved", readme)
+        self.assertIn("calibrated_wall_seconds_saved", skill)
+        self.assertIn("calibrate --suite full-ut", readme)
+        self.assertIn("bcef5c5bc68dddfb68a3d341f41fad44c11fb52e", case_study)
+        self.assertIn("b465fdbfe175304d9b977da137b2c178ae1091d3", case_study)
 
     def test_demo_is_a_1200_by_640_animated_gif(self) -> None:
         content = DEMO.read_bytes()

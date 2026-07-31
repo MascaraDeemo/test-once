@@ -19,6 +19,10 @@ Contributions are welcome.
    python3 benchmarks/run_benchmark.py
    ```
 
+   Distinguish forced-fresh benchmark work from native warm-cache behavior.
+   Do not present `nominal_test_seconds_avoided` as observed wall time; use an
+   explicit warm calibration or a directly timed baseline.
+
 6. Explain the cache-soundness impact in the pull request.
 
 Keep dependencies minimal. Test Once currently uses only the Python standard library and Git.

@@ -1,7 +1,7 @@
 {
   "name": "test-once",
-  "version": "0.2.1",
-  "description": "Stop duplicate expensive full-suite runs across Codex sessions, safely reuse exact passing results, and report avoided runs and time.",
+  "version": "0.2.2",
+  "description": "Stop duplicate expensive full-suite runs across Codex sessions, safely reuse exact passing results, and distinguish nominal work from warm-calibrated wall-time savings.",
   "author": {
     "name": "MascaraDeemo",
     "url": "https://github.com/MascaraDeemo"
@@ -24,8 +24,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Test Once",
-    "shortDescription": "Run full test suites once and see time saved.",
-    "longDescription": "Stop development, review, and parallel Codex sessions from rerunning the same expensive full suite. Test Once reuses only passing results matched by exact source, command, environment, platform, and toolchain fingerprints; single-flight locking collapses concurrent runs; focused tests stay untouched; and local statistics show avoided runs and test time. It works with Go, TypeScript, and any shell-driven test suite without telemetry.",
+    "shortDescription": "Reuse exact full-suite passes with honest savings.",
+    "longDescription": "Stop development, review, and parallel Codex sessions from rerunning the same expensive full suite. Test Once reuses only passing results matched by exact source, command, environment, platform, and toolchain fingerprints; single-flight locking collapses concurrent runs; focused tests stay untouched; and local statistics separate nominal avoided test work from optional warm-calibrated wall-time savings, so native runner caches are not mistaken for plugin savings. It works with Go, TypeScript, and any shell-driven test suite without telemetry.",
     "developerName": "MascaraDeemo",
     "category": "Productivity",
     "capabilities": [
@@ -36,7 +36,7 @@
     "defaultPrompt": [
       "Configure Test Once for this repository's full test suite.",
       "Run or reuse the configured full test suite safely.",
-      "Show how many full-suite runs and seconds Test Once has saved."
+      "Show avoided runs and warm-calibrated wall-time savings."
     ]
   }
 }

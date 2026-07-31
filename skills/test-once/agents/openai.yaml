@@ -1,4 +1,4 @@
 interface:
   display_name: "Test Once"
-  short_description: "Run full test suites once and show time saved"
+  short_description: "Reuse full-suite passes with honest savings"
   default_prompt: "Use $test-once to run or reuse this repository full test suite safely."

@@ -76,7 +76,10 @@ class TestOnceIntegrationTest(unittest.TestCase):
                 if mutation := os.environ.get("RUNNER_MUTATE"):
                     Path(mutation).write_text("changed during test\\n")
                 time.sleep(float(os.environ.get("RUNNER_SLEEP", "0")))
-                raise SystemExit(int(os.environ.get("RUNNER_EXIT", "0")))
+                exit_code = os.environ.get("RUNNER_EXIT", "0")
+                if count > 0:
+                    exit_code = os.environ.get("RUNNER_EXIT_AFTER_FIRST", exit_code)
+                raise SystemExit(int(exit_code))
                 """
             ).lstrip(),
             encoding="utf-8",
@@ -98,6 +101,8 @@ class TestOnceIntegrationTest(unittest.TestCase):
             "RUNNER_EXIT",
             "--env",
             "RUNNER_MUTATE",
+            "--env",
+            "RUNNER_EXIT_AFTER_FIRST",
         )
         self.git(repo, "add", ".codex/test-once.json")
         self.git(repo, "commit", "-qm", "configure test once")
@@ -143,6 +148,7 @@ class TestOnceIntegrationTest(unittest.TestCase):
         self.assertIn("TEST-ONCE STORED: PASS", first.stdout)
         self.assertIn("TEST-ONCE HIT: PASS", second.stdout)
         self.assertEqual(counter.read_text(), "1")
+        self.assertEqual(payload["stats_schema"], 2)
         self.assertEqual(payload["suite"], "full-ut")
         self.assertEqual(payload["run_requests"], 2)
         self.assertEqual(payload["executed_runs"], 1)
@@ -153,8 +159,13 @@ class TestOnceIntegrationTest(unittest.TestCase):
         self.assertEqual(payload["runs_avoided"], 1)
         self.assertEqual(payload["cache_hit_rate"], 0.5)
         self.assertGreaterEqual(payload["executed_test_seconds"], 0.15)
-        self.assertGreaterEqual(payload["test_seconds_avoided"], 0.15)
-        self.assertGreater(payload["estimated_wall_seconds_saved"], 0)
+        self.assertGreaterEqual(payload["nominal_test_seconds_avoided"], 0.15)
+        self.assertNotIn("test_seconds_avoided", payload)
+        self.assertNotIn("estimated_wall_seconds_saved", payload)
+        self.assertEqual(payload["calibrated_cache_hits"], 0)
+        self.assertEqual(payload["uncalibrated_cache_hits"], 1)
+        self.assertEqual(payload["calibration_coverage"], 0.0)
+        self.assertIsNone(payload["calibrated_wall_seconds_saved"])
         self.assertGreaterEqual(payload["hit_resolution_seconds"], 0)
         self.assertIsInstance(payload["first_event_at"], str)
         self.assertIsInstance(payload["last_event_at"], str)
@@ -163,6 +174,125 @@ class TestOnceIntegrationTest(unittest.TestCase):
         self.assertIn("TEST-ONCE STATS", human)
         self.assertIn("runs_avoided: 1", human)
         self.assertIn("cache_hit_rate: 50.0%", human)
+        self.assertIn("nominal_test_seconds_avoided:", human)
+        self.assertIn("calibrated_wall_seconds_saved: unavailable", human)
+
+    def test_v1_stats_migrate_without_preserving_unverified_wall_savings(
+        self,
+    ) -> None:
+        repo, counter, _ = self.make_repo("stats-v1")
+        self.command(repo, "run")
+        current = json.loads(self.command(repo, "stats", "--json").stdout)
+        stats_path = Path(current["stats_path"])
+        stats_path.write_text(
+            json.dumps(
+                {
+                    "stats_schema": 1,
+                    "repo_id": current["repo_id"],
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "suites": {
+                        "full-ut": {
+                            "run_requests": 2,
+                            "cache_hits": 1,
+                            "executed_runs": 1,
+                            "passed_runs": 1,
+                            "failed_runs": 0,
+                            "unstable_runs": 0,
+                            "executed_test_seconds": 0.2,
+                            "test_seconds_avoided": 0.2,
+                            "hit_resolution_seconds": 0.01,
+                            "estimated_wall_seconds_saved": 0.19,
+                            "first_event_at": "2026-01-01T00:00:00+00:00",
+                            "last_event_at": "2026-01-01T00:00:01+00:00",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        migrated = json.loads(self.command(repo, "stats", "--json").stdout)
+        self.assertEqual(migrated["stats_schema"], 2)
+        self.assertEqual(migrated["nominal_test_seconds_avoided"], 0.2)
+        self.assertEqual(migrated["calibrated_cache_hits"], 0)
+        self.assertEqual(migrated["uncalibrated_cache_hits"], 1)
+        self.assertIsNone(migrated["calibrated_wall_seconds_saved"])
+
+        hit = self.command(repo, "run")
+        stored = json.loads(stats_path.read_text(encoding="utf-8"))
+        self.assertIn("TEST-ONCE HIT: PASS", hit.stdout)
+        self.assertEqual(counter.read_text(), "1")
+        self.assertEqual(stored["stats_schema"], 2)
+        self.assertNotIn(
+            "estimated_wall_seconds_saved", stored["suites"]["full-ut"]
+        )
+        self.assertEqual(
+            stored["suites"]["full-ut"]["uncalibrated_cache_hits"], 2
+        )
+
+    def test_calibrate_records_warm_baseline_for_future_hits(self) -> None:
+        repo, counter, _ = self.make_repo("calibrate")
+        env = {"RUNNER_EXIT": "0", "RUNNER_SLEEP": "0.4"}
+
+        first = self.command(repo, "run", env=env)
+        calibration = self.command(repo, "calibrate", env=env)
+        hit = self.command(repo, "run", env=env)
+        stats = json.loads(self.command(repo, "stats", "--json", env=env).stdout)
+        status = json.loads(
+            self.command(repo, "status", "--json", env=env).stdout
+        )
+
+        self.assertIn("TEST-ONCE STORED: PASS", first.stdout)
+        self.assertIn("TEST-ONCE CALIBRATED", calibration.stdout)
+        self.assertIn("TEST-ONCE HIT: PASS", hit.stdout)
+        self.assertEqual(counter.read_text(), "2")
+        self.assertEqual(stats["run_requests"], 2)
+        self.assertEqual(stats["executed_runs"], 1)
+        self.assertEqual(stats["cache_hits"], 1)
+        self.assertEqual(stats["calibrated_cache_hits"], 1)
+        self.assertEqual(stats["uncalibrated_cache_hits"], 0)
+        self.assertEqual(stats["calibration_coverage"], 1.0)
+        self.assertGreaterEqual(stats["calibrated_warm_seconds_avoided"], 0.3)
+        self.assertGreater(stats["calibrated_wall_seconds_saved"], 0)
+        warm_baseline = status["result"]["warm_baseline"]
+        self.assertGreaterEqual(warm_baseline["duration_seconds"], 0.3)
+        self.assertEqual(
+            warm_baseline["source_fingerprint"], status["source"]["fingerprint"]
+        )
+        self.assertTrue(
+            Path(status["result_path"]).parent.joinpath(
+                warm_baseline["log_file"]
+            ).is_file()
+        )
+
+    def test_calibrate_requires_a_current_passing_result(self) -> None:
+        repo, counter, _ = self.make_repo("calibrate-miss")
+
+        calibration = self.command(repo, "calibrate", check=False)
+
+        self.assertEqual(calibration.returncode, 2)
+        self.assertIn("run the suite once first", calibration.stdout)
+        self.assertFalse(counter.exists())
+
+    def test_failed_calibration_preserves_the_passing_result(self) -> None:
+        repo, counter, _ = self.make_repo("calibrate-failure")
+        env = {
+            "RUNNER_EXIT": "0",
+            "RUNNER_EXIT_AFTER_FIRST": "7",
+            "RUNNER_SLEEP": "0",
+        }
+        self.command(repo, "run", env=env)
+
+        calibration = self.command(repo, "calibrate", env=env, check=False)
+        status = json.loads(
+            self.command(repo, "status", "--json", env=env).stdout
+        )
+
+        self.assertEqual(calibration.returncode, 7)
+        self.assertIn("CALIBRATION NOT STORED", calibration.stdout)
+        self.assertEqual(counter.read_text(), "2")
+        self.assertTrue(status["reusable"])
+        self.assertNotIn("warm_baseline", status["result"])
 
     def test_concurrent_sessions_execute_underlying_command_once(self) -> None:
         repo, counter, _ = self.make_repo("concurrent")

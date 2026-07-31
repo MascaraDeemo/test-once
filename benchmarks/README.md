@@ -22,16 +22,20 @@ median.
 
 | Suite | Direct total | Test Once total | Underlying runs | Cache hits | Wall time saved | Reduction |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Go (`go test -count=1 ./...`) | 4.299s | 1.919s | 1 | 2 | 2.380s | 55.4% |
-| TypeScript (`npm test --silent`) | 4.020s | 2.089s | 1 | 2 | 1.930s | 48.0% |
+| Go (`go test -count=1 ./...`) | 4.207s | 1.968s | 1 | 2 | 2.240s | 53.2% |
+| TypeScript (`npm test --silent`) | 4.025s | 2.116s | 1 | 2 | 1.909s | 47.4% |
 
 The direct baseline starts the native test runner three times. The Test Once
 total includes every cache cost and starts the native runner once.
 
-The avoided test work for `N` identical requests and a suite duration of `T`
-is `(N - 1) × T`. For three sessions requesting a 20-minute suite, that is 40
-minutes of test processes avoided. Actual wall time saved is lower by lookup
-or single-flight waiting time and is reported by `test_once.py stats`.
+For a runner that forces fresh execution, the nominal avoided test work for
+`N` identical requests and a suite duration of `T` is `(N - 1) × T`. Native
+runner caches may make normal warm reruns much cheaper. `test_once.py stats`
+therefore exposes that nominal value separately and reports wall-time savings
+only for hits backed by an explicit warm calibration.
+
+See the [real-world case study](real-world.md) for Syncthing and
+Microsoft/TypeScript results that account for native warm caches.
 
 ## Reproduce
 
@@ -61,7 +65,9 @@ python3 benchmarks/run_benchmark.py \
 
 Each trial uses a new temporary Git repository and Test Once cache. Go result
 caching is disabled with `-count=1`. The benchmark makes no network requests
-and removes its temporary repositories on completion.
+and removes its temporary repositories on completion. The wall-time table is
+computed from directly observed command totals; it does not use the nominal
+statistics field as a wall-time estimate.
 
 To regenerate the ten-second README demo:
 
