@@ -15,6 +15,7 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 RUNNER = PLUGIN_ROOT / "skills" / "test-once" / "scripts" / "test_once.py"
 HOOK = PLUGIN_ROOT / "hooks" / "test_once_hook.py"
+CURSOR_HOOK = PLUGIN_ROOT / "cursor" / "test_once_cursor_hook.py"
 
 
 class TestOnceIntegrationTest(unittest.TestCase):
@@ -104,9 +105,82 @@ class TestOnceIntegrationTest(unittest.TestCase):
             "--env",
             "RUNNER_EXIT_AFTER_FIRST",
         )
-        self.git(repo, "add", ".codex/test-once.json")
+        self.git(repo, "add", ".test-once.json")
         self.git(repo, "commit", "-qm", "configure test once")
         return repo, counter, test_command
+
+    def test_init_writes_agent_neutral_config(self) -> None:
+        repo = self.base / "neutral-config"
+        repo.mkdir()
+        self.git(repo, "init", "-q")
+
+        self.command(
+            repo,
+            "init",
+            "--command",
+            "python3 -m unittest",
+            "--fingerprint-command",
+            "none",
+        )
+
+        self.assertTrue((repo / ".test-once.json").is_file())
+        self.assertFalse((repo / ".codex/test-once.json").exists())
+
+    def test_legacy_codex_config_remains_reusable(self) -> None:
+        repo, counter, _ = self.make_repo("legacy-config")
+        legacy = repo / ".codex/test-once.json"
+        legacy.parent.mkdir()
+        (repo / ".test-once.json").replace(legacy)
+
+        status = json.loads(self.command(repo, "status", "--json").stdout)
+        first = self.command(repo, "run")
+        second = self.command(repo, "run")
+
+        self.assertEqual(Path(status["config_path"]), legacy.resolve())
+        self.assertIn("TEST-ONCE STORED: PASS", first.stdout)
+        self.assertIn("TEST-ONCE HIT: PASS", second.stdout)
+        self.assertEqual(counter.read_text(), "1")
+
+    def test_init_migrates_legacy_config_to_neutral_path(self) -> None:
+        repo, _, test_command = self.make_repo("migrate-config")
+        canonical = repo / ".test-once.json"
+        legacy = repo / ".codex/test-once.json"
+        legacy.parent.mkdir()
+        canonical.replace(legacy)
+
+        result = self.command(
+            repo,
+            "init",
+            "--command",
+            test_command,
+            "--fingerprint-command",
+            "none",
+            "--force",
+        )
+
+        self.assertIn("Migrated Test Once configuration", result.stdout)
+        self.assertTrue(canonical.is_file())
+        self.assertFalse(legacy.exists())
+        config = json.loads(canonical.read_text(encoding="utf-8"))
+        self.assertEqual(config["suites"]["full-ut"]["command"], test_command)
+
+    def test_conflicting_neutral_and_legacy_configs_fail_closed(self) -> None:
+        repo, counter, _ = self.make_repo("conflicting-configs")
+        canonical = repo / ".test-once.json"
+        legacy = repo / ".codex/test-once.json"
+        legacy.parent.mkdir()
+        config = json.loads(canonical.read_text(encoding="utf-8"))
+        config["suites"]["full-ut"]["command"] = "python3 -m unittest"
+        legacy.write_text(json.dumps(config), encoding="utf-8")
+
+        status = self.command(repo, "status", "--json", check=False)
+        run = self.command(repo, "run", check=False)
+
+        self.assertEqual(status.returncode, 2)
+        self.assertEqual(run.returncode, 2)
+        self.assertIn("Conflicting Test Once configurations", status.stdout)
+        self.assertIn("Conflicting Test Once configurations", run.stdout)
+        self.assertFalse(counter.exists())
 
     def test_success_is_reused_and_dirty_change_gets_new_key(self) -> None:
         repo, counter, _ = self.make_repo("reuse")
@@ -566,6 +640,128 @@ class TestOnceIntegrationTest(unittest.TestCase):
             check=True,
         )
         self.assertEqual(untouched.stdout, "")
+
+    def test_cursor_hook_injects_policy_and_rewrites_only_exact_suite(self) -> None:
+        repo, _, test_command = self.make_repo("cursor-hook")
+        start_payload = {
+            "hook_event_name": "sessionStart",
+            "cwd": str(repo),
+            "session_id": "cursor-session",
+        }
+        started = subprocess.run(
+            [sys.executable, str(CURSOR_HOOK)],
+            input=json.dumps(start_payload),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        start_result = json.loads(started.stdout)
+        self.assertIn(
+            "shared full-suite policy is active",
+            start_result["additional_context"],
+        )
+
+        pre_payload = {
+            "hook_event_name": "preToolUse",
+            "tool_name": "Shell",
+            "cwd": str(repo),
+            "tool_input": {
+                "command": f"rtk {test_command}",
+                "working_directory": str(repo),
+            },
+        }
+        rewritten = subprocess.run(
+            [sys.executable, str(CURSOR_HOOK)],
+            input=json.dumps(pre_payload),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        output = json.loads(rewritten.stdout)
+        self.assertEqual(output["permission"], "allow")
+        self.assertFalse(output["updated_input"]["command"].startswith("rtk "))
+        self.assertIn("test_once.py", output["updated_input"]["command"])
+        self.assertIn("run --suite full-ut", output["updated_input"]["command"])
+
+        pre_payload["tool_input"]["command"] = "pytest tests/test_small.py"
+        untouched = subprocess.run(
+            [sys.executable, str(CURSOR_HOOK)],
+            input=json.dumps(pre_payload),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        self.assertEqual(untouched.stdout, "")
+
+    def test_three_agent_hook_rewrites_share_one_underlying_run(self) -> None:
+        repo, counter, test_command = self.make_repo("three-agents")
+        codex_or_claude_payload = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "cwd": str(repo),
+            "tool_input": {"command": test_command},
+        }
+        cursor_payload = {
+            "hook_event_name": "preToolUse",
+            "tool_name": "Shell",
+            "cwd": str(repo),
+            "tool_input": {
+                "command": test_command,
+                "working_directory": str(repo),
+            },
+        }
+
+        rewritten_commands = []
+        for hook, payload, output_path in (
+            (HOOK, codex_or_claude_payload, ("hookSpecificOutput", "updatedInput")),
+            (HOOK, codex_or_claude_payload, ("hookSpecificOutput", "updatedInput")),
+            (CURSOR_HOOK, cursor_payload, ("updated_input",)),
+        ):
+            result = subprocess.run(
+                [sys.executable, str(hook)],
+                input=json.dumps(payload),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            parsed = json.loads(result.stdout)
+            for key in output_path:
+                parsed = parsed[key]
+            rewritten_commands.append(parsed["command"])
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "TEST_ONCE_CACHE_DIR": str(self.cache),
+                "RUNNER_SLEEP": "0.8",
+                "RUNNER_EXIT": "0",
+            }
+        )
+        processes = [
+            subprocess.Popen(
+                shlex.split(command),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+            )
+            for command in rewritten_commands
+        ]
+        outputs = []
+        for process in processes:
+            output, _ = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, output)
+            outputs.append(output)
+
+        combined = "".join(outputs)
+        self.assertEqual(counter.read_text(), "1")
+        self.assertEqual(combined.count("TEST-ONCE STORED: PASS"), 1)
+        self.assertEqual(combined.count("TEST-ONCE HIT: PASS"), 2)
+        self.assertIn("TEST-ONCE WAIT:", combined)
 
 
 if __name__ == "__main__":

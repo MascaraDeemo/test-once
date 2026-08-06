@@ -151,7 +151,7 @@ def configure_test_once(
         cwd=repo,
         env=env,
     )
-    git(repo, "add", ".codex/test-once.json")
+    git(repo, "add", ".test-once.json")
     git(repo, "commit", "-qm", "configure Test Once")
 
 

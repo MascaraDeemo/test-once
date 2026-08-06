@@ -1,11 +1,11 @@
 ---
 name: test-once
-description: Reuse a passing repository-wide unit-test or integration-test result across Codex development, review, and parallel sessions with an exact source snapshot, command, and environment fingerprint plus single-flight locking. Use whenever Codex is about to run an expensive full test suite, verify whether a full suite already passed, configure shared test caching for a large repository, or avoid duplicate test runs at the same revision. Do not use for focused or targeted tests.
+description: Reuse exact passing repository-wide test results across Codex, Claude Code, and Cursor sessions with source, command, environment, toolchain fingerprints, and single-flight locking. Use before expensive full unit or integration suites, when checking an existing full-suite pass, or when configuring shared test caching. Never use for focused tests.
 ---
 
 # Test Once
 
-Run the bundled `scripts/test_once.py` by resolving it relative to this `SKILL.md`. Prefer an absolute script path. The plugin's session hook normally supplies the exact installed command automatically.
+Run the bundled `scripts/test_once.py` by resolving it relative to this `SKILL.md`. Prefer an absolute script path. The host plugin's session hook normally supplies the exact installed command automatically.
 
 ## Apply the policy
 
@@ -14,8 +14,8 @@ Run the bundled `scripts/test_once.py` by resolving it relative to this `SKILL.m
 - Never infer a full-suite pass from `HEAD` alone. Dirty tracked files and untracked files are included in the source fingerprint.
 - Cache only successful runs. Let failed runs execute again.
 - If the runner reports that the source changed during testing, do not claim success for the current state; stabilize the worktree and rerun.
-- Do not bypass the runner for a command listed in `.codex/test-once.json`. The `PreToolUse` hook rewrites exact configured commands as a backstop.
-- Treat repository configuration as executable code. Review `.codex/test-once.json` before running a suite from an untrusted repository.
+- Do not bypass the runner for a command listed in `.test-once.json`. The host hook rewrites exact configured commands as a backstop.
+- Treat repository configuration as executable code. Review `.test-once.json`, or the legacy `.codex/test-once.json`, before running a suite from an untrusted repository.
 
 ## Use an existing configuration
 
@@ -39,7 +39,7 @@ python3 <skill-dir>/scripts/test_once.py init \
   --fingerprint-command auto
 ```
 
-This writes `.codex/test-once.json`. Commit that file when the policy should apply to every local Codex session for the repository.
+This writes `.test-once.json`. Commit that file when the policy should apply to every local Codex, Claude Code, and Cursor session for the repository. Existing `.codex/test-once.json` files remain readable and migrate on the next successful `init` update.
 
 For a TypeScript repository, use its real full-suite command:
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Codex lifecycle hook for the Test Once plugin."""
+"""Codex and Claude Code hook adapter for the shared Test Once runner."""
 
 from __future__ import annotations
 

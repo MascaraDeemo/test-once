@@ -1,0 +1,30 @@
+{
+  "name": "test-once",
+  "description": "Cross-agent single-flight caching for expensive repository-wide test suites.",
+  "version": "0.3.0",
+  "owner": {
+    "name": "MascaraDeemo",
+    "url": "https://github.com/MascaraDeemo"
+  },
+  "plugins": [
+    {
+      "name": "test-once",
+      "source": "./",
+      "description": "Reuse exact passing full-suite results across Claude Code, Codex, and Cursor sessions.",
+      "version": "0.3.0",
+      "author": {
+        "name": "MascaraDeemo",
+        "url": "https://github.com/MascaraDeemo"
+      },
+      "homepage": "https://github.com/MascaraDeemo/test-once",
+      "repository": "https://github.com/MascaraDeemo/test-once",
+      "license": "Apache-2.0",
+      "category": "development",
+      "tags": [
+        "testing",
+        "productivity",
+        "multi-agent"
+      ]
+    }
+  ]
+}

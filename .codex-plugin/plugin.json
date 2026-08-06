@@ -1,7 +1,7 @@
 {
   "name": "test-once",
-  "version": "0.2.2",
-  "description": "Stop duplicate expensive full-suite runs across Codex sessions, safely reuse exact passing results, and distinguish nominal work from warm-calibrated wall-time savings.",
+  "version": "0.3.0",
+  "description": "Stop duplicate expensive full-suite runs across Codex, Claude Code, and Cursor sessions, reuse exact passing results, and report honest warm-calibrated savings.",
   "author": {
     "name": "MascaraDeemo",
     "url": "https://github.com/MascaraDeemo"
@@ -12,6 +12,9 @@
   "keywords": [
     "codex",
     "codex-plugin",
+    "claude-code",
+    "cursor",
+    "multi-agent",
     "testing",
     "unit-tests",
     "single-flight",
@@ -24,8 +27,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Test Once",
-    "shortDescription": "Reuse exact full-suite passes with honest savings.",
-    "longDescription": "Stop development, review, and parallel Codex sessions from rerunning the same expensive full suite. Test Once reuses only passing results matched by exact source, command, environment, platform, and toolchain fingerprints; single-flight locking collapses concurrent runs; focused tests stay untouched; and local statistics separate nominal avoided test work from optional warm-calibrated wall-time savings, so native runner caches are not mistaken for plugin savings. It works with Go, TypeScript, and any shell-driven test suite without telemetry.",
+    "shortDescription": "Reuse exact full-suite passes across coding agents.",
+    "longDescription": "Stop development, review, and parallel sessions across Codex, Claude Code, and Cursor from rerunning the same expensive full suite. Test Once reuses only passing results matched by exact source, command, environment, platform, and toolchain fingerprints; single-flight locking collapses concurrent runs across agents; focused tests stay untouched; and local statistics separate nominal avoided test work from optional warm-calibrated wall-time savings. It works with Go, TypeScript, and any shell-driven test suite without telemetry.",
     "developerName": "MascaraDeemo",
     "category": "Productivity",
     "capabilities": [
@@ -34,7 +37,7 @@
     ],
     "websiteURL": "https://github.com/MascaraDeemo/test-once",
     "defaultPrompt": [
-      "Configure Test Once for this repository's full test suite.",
+      "Configure shared Test Once for this repository's full test suite.",
       "Run or reuse the configured full test suite safely.",
       "Show avoided runs and warm-calibrated wall-time savings."
     ]

@@ -5,9 +5,9 @@
 [![License](https://img.shields.io/github/license/MascaraDeemo/test-once)](LICENSE)
 
 **Run an expensive full test suite once per exact source snapshot, then reuse
-the passing result across Codex development, review, and parallel sessions.**
+the passing result across Codex, Claude Code, and Cursor sessions.**
 
-![Three Codex sessions reuse one passing full-suite result](assets/demo.gif)
+![Three coding-agent sessions reuse one passing full-suite result](assets/demo.gif)
 
 For an exact repository snapshot, test command, environment, platform, and
 toolchain fingerprint, the underlying suite runs at most once at a time.
@@ -51,7 +51,13 @@ cached its build and lint work but still reran 106,371 tests. This distinction
 is the reason v0.2.2 separates nominal and calibrated savings. See the
 [real-world methodology and limits](benchmarks/real-world.md).
 
-## Install in two commands
+## Install
+
+All three integrations use the same runner, repository configuration, and
+machine-local cache. A passing result produced through one agent can be reused
+by the others.
+
+### Codex
 
 ```bash
 codex plugin marketplace add MascaraDeemo/test-once --ref main
@@ -61,13 +67,35 @@ codex plugin add test-once@test-once
 Start a new Codex task after installation. Review and trust the plugin hook
 when Codex prompts you; plugin hooks are never trusted automatically.
 
-Then ask Codex:
+### Claude Code
+
+```bash
+claude plugin marketplace add MascaraDeemo/test-once
+claude plugin install test-once@test-once
+```
+
+Run `/reload-plugins` or start a new Claude Code session after installation.
+
+### Cursor
+
+Until Test Once is listed in the Cursor Marketplace, install the full local
+plugin from GitHub:
+
+```bash
+git clone https://github.com/MascaraDeemo/test-once.git \
+  ~/.cursor/plugins/local/test-once
+```
+
+Restart Cursor or run **Developer: Reload Window**. The local plugin includes
+both the Agent Skill and the deterministic `preToolUse` hook.
+
+Then ask any supported agent:
 
 ```text
 Configure Test Once for this repository's full test suite.
 ```
 
-To update later:
+To update the Codex installation later:
 
 ```bash
 codex plugin marketplace upgrade test-once
@@ -91,7 +119,7 @@ share a result. Separate clones remain isolated.
 
 ## Requirements
 
-- Codex with plugin lifecycle-hook support
+- Codex, Claude Code, or Cursor with lifecycle-hook support
 - Git
 - Python 3.10 or newer
 - macOS or Linux
@@ -128,7 +156,11 @@ python3 <plugin-root>/skills/test-once/scripts/test_once.py init \
 
 Use the actual full-suite command from the repository's CI or documentation. Do not substitute a focused-test command.
 
-The command creates `.codex/test-once.json`. Commit that file if every Codex session in the repository should use the same policy. Add repeated `--match` options for exact alternate spellings that the hook should intercept.
+The command creates `.test-once.json`. Commit that file when every local agent
+should use the same policy. Existing `.codex/test-once.json` files remain
+readable; the next successful `init` update migrates them to the neutral path.
+Add repeated `--match` options for exact alternate spellings that the hooks
+should intercept.
 
 If a command is wrapped by `rtk` or `rtk proxy`, Test Once ignores that leading wrapper while matching. `rtk` is optional and is never required to run the plugin.
 
@@ -184,7 +216,9 @@ The default auto-detection covers common Go, Node.js, Python, Rust, Bazel, Maven
 - Statistics contain aggregate counters, durations, timestamps, the suite name, and a hash of the local repository identity; they do not contain source, commands, or environment values.
 - Test output logs may contain sensitive data. They remain in the local cache under `~/Library/Caches/test-once` on macOS, `$XDG_CACHE_HOME/test-once` when that variable is set on Linux, or `~/.cache/test-once` otherwise.
 - Warm-calibration output is another local test log and has the same sensitivity.
-- `.codex/test-once.json` contains shell commands. Review it before using the plugin in an untrusted repository.
+- `.test-once.json` contains shell commands. Legacy `.codex/test-once.json`
+  files have the same trust requirement. Review the configuration before using
+  the plugin in an untrusted repository.
 - Ignored files are not part of the source snapshot unless configured with `--extra-input`.
 - A cached local pass is not a replacement for required CI, release checks, flaky-test detection, or tests that intentionally exercise changing external systems.
 - Only passing results are reusable. A source change during execution prevents the result from being stored.
@@ -200,8 +234,9 @@ python3 -m unittest discover -s tests -v
 The tests exercise cache reuse, dirty snapshots, clean worktrees,
 single-flight concurrency, savings statistics, failed and unstable runs,
 corrupt-stat isolation, environment changes, TypeScript toolchain
-fingerprints, hook rewriting, release-version alignment, marketplace metadata,
-and demo-asset packaging.
+fingerprints, Codex/Claude/Cursor hook rewriting, cross-agent single-flight,
+configuration migration, release-version alignment, marketplace metadata, and
+demo-asset packaging.
 
 ## License
 

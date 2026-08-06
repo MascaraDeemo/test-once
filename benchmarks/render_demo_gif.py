@@ -62,7 +62,7 @@ def render_frame(lines: list[tuple[str, str]]) -> Image.Image:
         draw.ellipse((x - 7, 40 - 7, x + 7, 40 + 7), fill=color)
     draw.text(
         (150, 27),
-        "Test Once - three Codex sessions, one full-suite process",
+        "Test Once - three coding agents, one full-suite process",
         font=title_font,
         fill=TEXT,
     )
@@ -83,19 +83,19 @@ def render_frame(lines: list[tuple[str, str]]) -> Image.Image:
 
 def frames() -> tuple[list[Image.Image], list[int]]:
     first = [
-        ("$ Codex task A -> go test -count=1 ./...", BLUE),
+        ("$ Codex -> go test -count=1 ./...", BLUE),
         ("TEST-ONCE MISS: running this exact suite key once", YELLOW),
         ("ok   example.com/test-once-benchmark   1.00s", TEXT),
         ("TEST-ONCE STORED: PASS", GREEN),
     ]
     second = first + [
         ("", TEXT),
-        ("$ Codex task B -> go test -count=1 ./...", BLUE),
+        ("$ Claude Code -> go test -count=1 ./...", BLUE),
         ("TEST-ONCE HIT: PASS  (no test process started)", GREEN),
     ]
     third = second + [
         ("", TEXT),
-        ("$ Codex task C -> go test -count=1 ./...", BLUE),
+        ("$ Cursor -> go test -count=1 ./...", BLUE),
         ("TEST-ONCE HIT: PASS  (no test process started)", GREEN),
     ]
     fourth = [

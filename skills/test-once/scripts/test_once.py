@@ -25,11 +25,12 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-VERSION = "0.2.2"
+VERSION = "0.3.0"
 CONFIG_SCHEMA = 1
 CACHE_SCHEMA = 1
 STATS_SCHEMA = 2
-CONFIG_RELATIVE_PATH = Path(".codex") / "test-once.json"
+CONFIG_RELATIVE_PATH = Path(".test-once.json")
+LEGACY_CONFIG_RELATIVE_PATHS = (Path(".codex") / "test-once.json",)
 UNSTABLE_SOURCE_EXIT = 75
 DEFAULT_ENVIRONMENT = (
     "CI",
@@ -161,17 +162,39 @@ def validate_config(data: Any, path: Path) -> dict[str, Any]:
     return normalized
 
 
-def load_config(repo: Path) -> dict[str, Any]:
-    path = repo / CONFIG_RELATIVE_PATH
-    if not path.is_file():
-        raise TestOnceError(
-            f"No {CONFIG_RELATIVE_PATH} found under repository {repo}"
-        )
+def read_config(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise TestOnceError(f"Cannot read {path}: {exc}") from exc
     return validate_config(data, path)
+
+
+def configuration_path(repo: Path) -> Path:
+    canonical = repo / CONFIG_RELATIVE_PATH
+    legacy = [repo / relative for relative in LEGACY_CONFIG_RELATIVE_PATHS]
+    existing = [path for path in [canonical, *legacy] if path.is_file()]
+    if not existing:
+        accepted = ", ".join(
+            str(path) for path in [CONFIG_RELATIVE_PATH, *LEGACY_CONFIG_RELATIVE_PATHS]
+        )
+        raise TestOnceError(
+            f"No Test Once configuration ({accepted}) found under repository {repo}"
+        )
+    if canonical in existing and len(existing) > 1:
+        canonical_config = read_config(canonical)
+        for legacy_path in existing[1:]:
+            if read_config(legacy_path) != canonical_config:
+                raise TestOnceError(
+                    "Conflicting Test Once configurations found at "
+                    f"{canonical} and {legacy_path}; keep one authoritative file"
+                )
+        return canonical
+    return existing[0]
+
+
+def load_config(repo: Path) -> dict[str, Any]:
+    return read_config(configuration_path(repo))
 
 
 def command_tokens(command: str) -> list[str]:
@@ -1256,6 +1279,8 @@ def status_payload(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, 
         "result_path": str(layout["result"]),
         "result": result,
     }
+    if args.command is None:
+        payload["config_path"] = str(configuration_path(repo))
     return payload, layout
 
 
@@ -1345,16 +1370,21 @@ def command_calibrate(args: argparse.Namespace) -> int:
 def command_init(args: argparse.Namespace) -> int:
     repo, _ = discover_repo(args.repo or Path.cwd())
     path = repo / CONFIG_RELATIVE_PATH
+    legacy_paths = [
+        repo / relative
+        for relative in LEGACY_CONFIG_RELATIVE_PATHS
+        if (repo / relative).is_file()
+    ]
     if not args.command.strip():
         raise TestOnceError("The test command cannot be empty")
     if args.ttl_seconds is not None and args.ttl_seconds <= 0:
         raise TestOnceError("--ttl-seconds must be a positive integer")
+    if path.is_file() and legacy_paths:
+        configuration_path(repo)
     if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise TestOnceError(f"Cannot update {path}: {exc}") from exc
-        config = validate_config(existing, path)
+        config = read_config(path)
+    elif legacy_paths:
+        config = read_config(legacy_paths[0])
     else:
         config = {"schema_version": CONFIG_SCHEMA, "suites": {}}
     if args.suite in config["suites"] and not args.force:
@@ -1374,6 +1404,16 @@ def command_init(args: argparse.Namespace) -> int:
         "ttl_seconds": args.ttl_seconds,
     }
     atomic_write_json(path, config)
+    for legacy_path in legacy_paths:
+        try:
+            legacy_path.unlink()
+        except OSError as exc:
+            raise TestOnceError(
+                f"Configured {path} but could not remove legacy {legacy_path}: {exc}"
+            ) from exc
+    if legacy_paths:
+        migrated = ", ".join(str(item) for item in legacy_paths)
+        print(f"Migrated Test Once configuration from {migrated} to {path}")
     print(f"Configured Test Once suite `{args.suite}` in {path}")
     print(f"command: {args.command.strip()}")
     print(
