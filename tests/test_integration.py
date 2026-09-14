@@ -109,6 +109,155 @@ class TestOnceIntegrationTest(unittest.TestCase):
         self.git(repo, "commit", "-qm", "configure test once")
         return repo, counter, test_command
 
+    def test_scoped_test_reuses_pass_after_unrelated_edits_and_commits(self) -> None:
+        repo, counter, command = self.make_repo("scoped")
+        (repo / "unrelated.txt").write_text("original\n", encoding="utf-8")
+        self.command(repo, "init", "--force", "--command", command,
+                     "--fingerprint-command", "none",
+                     "--input", "runner.py", "--input", "tracked.txt")
+        self.git(repo, "add", ".")
+        self.git(repo, "commit", "-qm", "configure scoped test")
+        self.assertIn("TEST-ONCE STORED: PASS", self.command(repo, "run").stdout)
+        (repo / "unrelated.txt").write_text("changed\n", encoding="utf-8")
+        self.assertIn("TEST-ONCE HIT: PASS", self.command(repo, "run").stdout)
+        self.git(repo, "add", ".")
+        self.git(repo, "commit", "-qm", "unrelated change")
+        self.assertIn("TEST-ONCE HIT: PASS", self.command(repo, "run").stdout)
+        self.assertEqual(counter.read_text(), "1")
+        (repo / "tracked.txt").write_text("dependency changed\n", encoding="utf-8")
+        self.assertIn("TEST-ONCE MISS:", self.command(repo, "run").stdout)
+        self.assertEqual(counter.read_text(), "2")
+        status = json.loads(self.command(repo, "status", "--json").stdout)
+        self.assertEqual(status["source"]["inputs"], ["runner.py", "tracked.txt"])
+        self.assertEqual(status["source"]["input_file_count"], 2)
+
+    def test_scoped_directory_tracks_additions_deletions_without_index_noise(self) -> None:
+        repo, counter, command = self.make_repo("scoped-directory")
+        directory = repo / "deps"
+        directory.mkdir()
+        (directory / "one.txt").write_text("one\n", encoding="utf-8")
+        self.command(repo, "init", "--force", "--command", command,
+                     "--fingerprint-command", "none", "--input", "runner.py",
+                     "--input", "deps")
+        self.git(repo, "add", ".")
+        self.git(repo, "commit", "-qm", "configure directory scope")
+        self.command(repo, "run")
+        (directory / "two.txt").write_text("two\n", encoding="utf-8")
+        self.assertIn("TEST-ONCE MISS:", self.command(repo, "run").stdout)
+        self.git(repo, "add", ".")
+        self.assertIn("TEST-ONCE HIT: PASS", self.command(repo, "run").stdout)
+        (directory / "one.txt").unlink()
+        self.assertIn("TEST-ONCE MISS:", self.command(repo, "run").stdout)
+        self.git(repo, "add", ".")
+        self.git(repo, "commit", "-qm", "same filesystem, new index and commit")
+        self.assertIn("TEST-ONCE HIT: PASS", self.command(repo, "run").stdout)
+        self.assertEqual(counter.read_text(), "3")
+
+    def test_scoped_extra_inputs_reject_symlink_aliases(self) -> None:
+        repo, _, command = self.make_repo("scoped-extra-link")
+        (repo / "alias.txt").symlink_to("tracked.txt")
+        self.command(repo, "init", "--force", "--command", command,
+                     "--fingerprint-command", "none", "--input", "runner.py",
+                     "--extra-input", "alias.txt")
+        result = self.command(repo, "run", check=False)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("symlink", result.stdout)
+        self.assertNotIn("TEST-ONCE STORED", result.stdout)
+
+    def test_test_file_scopes_invalidate_independently_and_share_dependencies(self) -> None:
+        repo, first_counter, first_command = self.make_repo("test-files")
+        second_counter = self.base / "second-counter.txt"
+        second_command = shlex.join([sys.executable, "runner.py", str(second_counter)])
+        for name in ("first.test", "second.test", "shared.py"):
+            (repo / name).write_text("original\n", encoding="utf-8")
+        for name, command in (("first", first_command), ("second", second_command)):
+            self.command(repo, "init", "--suite", name, "--command", command,
+                         "--fingerprint-command", "none", "--input", "runner.py",
+                         "--input", f"{name}.test", "--input", "shared.py")
+            self.command(repo, "run", "--suite", name)
+        (repo / "first.test").write_text("changed test\n", encoding="utf-8")
+        self.assertIn("TEST-ONCE MISS:", self.command(repo, "run", "--suite", "first").stdout)
+        self.assertIn("TEST-ONCE HIT: PASS", self.command(repo, "run", "--suite", "second").stdout)
+        self.assertEqual(first_counter.read_text(), "2")
+        self.assertEqual(second_counter.read_text(), "1")
+        (repo / "shared.py").write_text("changed shared dependency\n", encoding="utf-8")
+        for name in ("first", "second"):
+            self.assertIn("TEST-ONCE MISS:", self.command(repo, "run", "--suite", name).stdout)
+        self.assertEqual(first_counter.read_text(), "3")
+        self.assertEqual(second_counter.read_text(), "2")
+
+    def test_scoped_ignored_inputs_and_relevant_mutations_are_detected(self) -> None:
+        repo, counter, command = self.make_repo("scoped-ignored")
+        (repo / ".gitignore").write_text(".env\nextra.txt\ncache.tmp\n", encoding="utf-8")
+        (repo / ".env").write_text("original\n", encoding="utf-8")
+        (repo / "extra.txt").write_text("original\n", encoding="utf-8")
+        self.command(repo, "init", "--force", "--command", command,
+                     "--fingerprint-command", "none", "--input", "runner.py",
+                     "--input", ".env", "--extra-input", "extra.txt", "--env", "RUNNER_MUTATE")
+        self.command(repo, "run")
+        (repo / "cache.tmp").write_text("unrelated ignored output\n", encoding="utf-8")
+        self.assertIn("TEST-ONCE HIT: PASS", self.command(repo, "run").stdout)
+        for name in (".env", "extra.txt"):
+            (repo / name).write_text("changed\n", encoding="utf-8")
+            self.assertIn("TEST-ONCE MISS:", self.command(repo, "run").stdout)
+        self.assertEqual(counter.read_text(), "3")
+        changed = self.command(repo, "run", env={"RUNNER_MUTATE": str(repo / ".env")}, check=False)
+        self.assertEqual(changed.returncode, 75, changed.stdout)
+        self.assertNotIn("TEST-ONCE STORED", changed.stdout)
+
+    def test_invalid_input_roots_do_not_overwrite_configuration(self) -> None:
+        repo, _, command = self.make_repo("invalid-inputs")
+        original = (repo / ".test-once.json").read_bytes()
+        for root in ("../outside", ".git/config", str(self.base / "outside"), "missing", "src/**"):
+            with self.subTest(root=root):
+                result = self.command(repo, "init", "--force", "--command", command,
+                                      "--input", root, check=False)
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertEqual((repo / ".test-once.json").read_bytes(), original)
+        config = json.loads(original)
+        config["suites"]["full-ut"]["inputs"] = []
+        (repo / ".test-once.json").write_text(json.dumps(config), encoding="utf-8")
+        result = self.command(repo, "run", check=False)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("non-empty", result.stdout)
+
+    def test_scoped_submodules_and_broken_symlinks_are_rejected(self) -> None:
+        repo, _, command = self.make_repo("scoped-boundaries")
+        child, _, _ = self.make_repo("scoped-module")
+        self.git(repo, "-c", "protocol.file.allow=always", "submodule", "add",
+                 "-q", str(child), "module")
+        (repo / "links").mkdir()
+        (repo / "links/broken").symlink_to("missing")
+        for root, reason in (("module/tracked.txt", "submodule"), ("links", "symlink")):
+            with self.subTest(root=root):
+                self.command(repo, "init", "--force", "--command", command,
+                             "--fingerprint-command", "none", "--input", root)
+                result = self.command(repo, "run", check=False)
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn(reason, result.stdout)
+                self.assertNotIn("TEST-ONCE STORED", result.stdout)
+        self.command(repo, "init", "--force", "--command", command,
+                     "--fingerprint-command", "none", "--input", "runner.py",
+                     "--extra-input", "module/tracked.txt")
+        result = self.command(repo, "run", check=False)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("submodule", result.stdout)
+
+    def test_scoped_hook_context_limits_the_evidence_to_its_command(self) -> None:
+        repo, _, command = self.make_repo("scoped-context")
+        self.command(repo, "init", "--force", "--command", command,
+                     "--fingerprint-command", "none", "--input", "runner.py")
+        for hook, event in ((HOOK, "SessionStart"), (CURSOR_HOOK, "sessionStart")):
+            with self.subTest(hook=hook.name):
+                result = subprocess.run(
+                    [sys.executable, str(hook)],
+                    input=json.dumps({"hook_event_name": event, "cwd": str(repo)}),
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+                )
+                self.assertIn("declared inputs", result.stdout)
+                self.assertIn("does not prove other tests passed", result.stdout)
+                self.assertNotIn("Focused tests are not", result.stdout)
+
     def test_init_writes_agent_neutral_config(self) -> None:
         repo = self.base / "neutral-config"
         repo.mkdir()

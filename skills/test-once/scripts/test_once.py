@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 CONFIG_SCHEMA = 1
 CACHE_SCHEMA = 2
 STATS_SCHEMA = 2
@@ -119,6 +119,19 @@ def validate_string_list(value: Any, field: str) -> list[str]:
     return list(value)
 
 
+def validate_inputs(value: Any) -> list[str]:
+    inputs = validate_string_list(value, "inputs")
+    if not inputs:
+        raise TestOnceError("`inputs` must be a non-empty array; omit it for the whole repository")
+    roots = set()
+    for item in inputs:
+        path = Path(item)
+        if path.is_absolute() or ".." in path.parts or ".git" in path.parts:
+            raise TestOnceError(f"inputs must stay within repository source paths: {item}")
+        roots.add(path.as_posix())
+    return sorted(roots)
+
+
 def validate_config(data: Any, path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise TestOnceError(f"{path} must contain a JSON object")
@@ -159,6 +172,8 @@ def validate_config(data: Any, path: Path) -> dict[str, Any]:
             ),
             "ttl_seconds": ttl,
         }
+        if "inputs" in raw:
+            normalized["suites"][name]["inputs"] = validate_inputs(raw["inputs"])
     return normalized
 
 
@@ -383,13 +398,17 @@ def hash_dirty_submodules(hasher: Any, repo: Path) -> None:
                 )
 
 
-def checked_extra_paths(repo: Path, patterns: list[str]) -> list[Path]:
+def checked_extra_paths(
+    repo: Path, patterns: list[str], *, scoped: bool = False
+) -> list[Path]:
     paths: set[Path] = set()
     for pattern in patterns:
         pattern_path = Path(pattern)
         if pattern_path.is_absolute():
             raise TestOnceError(f"extra_inputs must be repository-relative: {pattern}")
         for raw in glob.glob(str(repo / pattern), recursive=True):
+            if scoped:
+                ensure_scoped_path(repo, Path(raw))
             candidate = Path(raw).resolve()
             try:
                 candidate.relative_to(repo)
@@ -400,6 +419,76 @@ def checked_extra_paths(repo: Path, patterns: list[str]) -> list[Path]:
             if candidate.is_file() or candidate.is_symlink():
                 paths.add(candidate)
     return sorted(paths, key=lambda item: str(item))
+
+
+def ensure_scoped_path(repo: Path, path: Path) -> None:
+    relative = path.relative_to(repo)
+    for length in range(1, len(relative.parts) + 1):
+        if repo.joinpath(*relative.parts[:length]).is_symlink():
+            raise TestOnceError(
+                f"Scoped inputs cannot traverse symlinks: {relative}; use whole-repository mode"
+            )
+
+
+def scoped_source_identity(
+    repo: Path, suite: dict[str, Any], head: str, dirty: bool
+) -> dict[str, Any]:
+    roots = suite["inputs"]
+
+    def selected(name: str) -> bool:
+        return any(root == "." or name == root or name.startswith(root + "/") for root in roots)
+
+    hasher = hashlib.sha256()
+    hasher.update(b"test-once-inputs-v1\0")
+    hasher.update(canonical_json({"inputs": roots, "extra_inputs": suite.get("extra_inputs", [])}))
+    paths: set[str] = set()
+    for root in roots:
+        path = repo / root
+        ensure_scoped_path(repo, path)
+        kind = "directory" if path.is_dir() else "file" if path.is_file() else "missing"
+        hasher.update(canonical_json([root, kind]))
+        # An explicitly named file is an input even if Git ignores it.
+        if path.is_file():
+            paths.add(root)
+    index = run_capture(["git", "ls-files", "--stage", "-z"], repo)
+    submodules: set[str] = set()
+    for entry in filter(None, index.stdout.split(b"\0")):
+        metadata, raw_name = entry.split(b"\t", 1)
+        name = os.fsdecode(raw_name)
+        if metadata.startswith(b"160000 "):
+            submodules.add(name)
+            if selected(name) or any(root.startswith(name + "/") for root in roots):
+                raise TestOnceError(
+                    f"Scoped inputs intersect submodule {name}; use whole-repository mode"
+                )
+        if selected(name) and ((repo / name).exists() or (repo / name).is_symlink()):
+            paths.add(name)
+    untracked = run_capture(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"], repo
+    )
+    for raw_name in filter(None, untracked.stdout.split(b"\0")):
+        name = os.fsdecode(raw_name)
+        if selected(name):
+            paths.add(name)
+    for path in checked_extra_paths(repo, suite.get("extra_inputs", []), scoped=True):
+        name = path.relative_to(repo).as_posix()
+        if any(name == module or name.startswith(module + "/") for module in submodules):
+            raise TestOnceError(
+                f"Scoped extra input intersects a submodule: {name}; use whole-repository mode"
+            )
+        paths.add(name)
+    for name in sorted(paths):
+        path = repo / name
+        ensure_scoped_path(repo, path)
+        if not path.exists():
+            hasher.update(canonical_json([name, "missing"]))
+        else:
+            hash_file(hasher, path, name)
+    return {
+        "head": head, "dirty": dirty,
+        "fingerprint": f"inputs:v1:{hasher.hexdigest()}",
+        "inputs": roots, "input_file_count": len(paths),
+    }
 
 
 def source_identity(repo: Path, suite: dict[str, Any]) -> dict[str, Any]:
@@ -427,6 +516,8 @@ def source_identity(repo: Path, suite: dict[str, Any]) -> dict[str, Any]:
         repo,
     )
     dirty = bool(status_result.stdout)
+    if suite.get("inputs") is not None:
+        return scoped_source_identity(repo, suite, head, dirty)
     extra_paths = checked_extra_paths(repo, suite.get("extra_inputs", []))
     sparse = sparse_checkout_identity(repo)
     submodules = submodule_identity(repo)
@@ -1425,6 +1516,14 @@ def command_init(args: argparse.Namespace) -> int:
         "extra_inputs": list(dict.fromkeys(args.extra_input)),
         "ttl_seconds": args.ttl_seconds,
     }
+    if args.input is not None:
+        config["suites"][args.suite]["inputs"] = validate_inputs(args.input)
+        for root in config["suites"][args.suite]["inputs"]:
+            if not (repo / root).exists():
+                raise TestOnceError(
+                    f"Input path does not exist: {root}; --input takes literal files or directories, not globs"
+                )
+    validate_config(config, path)
     atomic_write_json(path, config)
     for legacy_path in legacy_paths:
         try:
@@ -1529,6 +1628,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init_parser.add_argument("--env", action="append", default=[])
     init_parser.add_argument("--extra-input", action="append", default=[])
+    init_parser.add_argument(
+        "--input", action="append",
+        help="Limit source inputs to this repository-relative file or directory; repeat for all dependencies",
+    )
     init_parser.add_argument("--ttl-seconds", type=int)
     init_parser.add_argument("--force", action="store_true")
     init_parser.set_defaults(handler=command_init)

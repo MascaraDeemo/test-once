@@ -33,22 +33,26 @@ def emit_context(event: str, context: str) -> None:
 
 def configured_context(repo: Path, config: dict[str, Any]) -> str:
     suite_lines = []
+    scoped = any("inputs" in suite for suite in config["suites"].values())
     for name, suite in config["suites"].items():
-        suite_lines.append(f"- {name}: `{suite['command']}`")
+        scope = ", ".join(suite["inputs"]) if "inputs" in suite else "whole repository"
+        suite_lines.append(f"- {name}: `{suite['command']}`; declared inputs: {scope}")
     runner = shlex.quote(str(RUNNER))
     repo_arg = shlex.quote(str(repo))
     return (
-        "Test Once shared full-suite policy is active for this repository.\n"
+        ("Test Once shared test policy is active for this repository.\n" if scoped
+         else "Test Once shared full-suite policy is active for this repository.\n")
         + "\n".join(suite_lines)
-        + "\nWhen repository-wide tests are needed, do not execute a listed command "
+        + "\nWhen configured tests are needed, do not execute a listed command "
         "directly. Run `python3 "
         + runner
         + " --repo "
         + repo_arg
         + " run --suite <name>`. A reported `TEST-ONCE HIT: PASS` is valid "
-        "verification evidence for the exact current source snapshot, command, and "
-        "environment fingerprint, so do not rerun that suite. Focused tests are not "
-        "covered and should run normally. Never claim a different suite passed."
+        "verification evidence only for that command, its declared inputs, and "
+        "environment fingerprint. It does not prove other tests passed. "
+        "Unconfigured focused tests run normally. Scoped inputs must cover test code, "
+        "transitive dependencies, fixtures, configuration, and lockfiles."
     )
 
 

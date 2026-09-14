@@ -4,16 +4,22 @@
 [![GitHub release](https://img.shields.io/github/v/release/MascaraDeemo/test-once)](https://github.com/MascaraDeemo/test-once/releases/latest)
 [![License](https://img.shields.io/github/license/MascaraDeemo/test-once)](LICENSE)
 
-**Run an expensive full test suite once per exact source snapshot, then reuse
+**Run a configured test command once per exact input snapshot, then reuse
 the passing result across Codex, Claude Code, and Cursor sessions.**
 
 ![Three coding-agent sessions reuse one passing full-suite result](assets/demo.gif)
 
-For an exact repository snapshot, test command, environment, platform, and
+For an exact source-input snapshot, test command, environment, platform, and
 toolchain fingerprint, the underlying suite runs at most once at a time.
 Passing results are reused; failures are never cached. Local statistics report
 avoided runs without telemetry and separate nominal test work from optional
 warm-calibrated wall-time savings.
+
+By default, inputs cover the whole repository. Version 0.4.0 also supports
+explicit file or directory scopes, so unrelated changes do not invalidate a
+passing command. Configure one command per test file or test group when you
+need independent reuse. Dependencies must be declared; this does not infer an
+import graph or automatically split a full-suite command into smaller runs.
 
 ## Measured result
 
@@ -179,6 +185,56 @@ the same suite. A simple unquoted `rtk` or `rtk proxy` prefix is ignored when
 followed by an unquoted static executable name; ordinary executable paths are
 also supported. Uncertain wrappers remain unchanged. `rtk` is optional.
 
+## Scope inputs to a test file or group
+
+Use `--input` repeatedly to declare **all** filesystem inputs for a command:
+
+```bash
+python3 <plugin-root>/skills/test-once/scripts/test_once.py init \
+  --suite auth-test \
+  --command 'pnpm exec vitest run tests/auth.test.ts' \
+  --input tests/auth.test.ts \
+  --input src/auth \
+  --input src/shared \
+  --input tests/setup.ts \
+  --input vitest.config.ts \
+  --input package.json \
+  --input pnpm-lock.yaml
+
+python3 <plugin-root>/skills/test-once/scripts/test_once.py run --suite auth-test
+```
+
+Adapt the paths to the repository's actual imports, shared code, setup hooks,
+fixtures, runner configuration, and dependency lockfiles. If the dependency
+closure is uncertain, declare broader directories or keep whole-repository
+mode. A cached test-file result proves only that command passed.
+
+The equivalent optional configuration field is `"inputs": ["tests/auth.test.ts",
+"src/auth", "src/shared", "tests/setup.ts", "vitest.config.ts", "package.json",
+"pnpm-lock.yaml"]` inside that suite's configuration.
+
+- Inputs are literal repository-relative files or directories, not glob patterns.
+  `init` checks that they exist before writing configuration. Subsequent additions
+  and deletions are part of the fingerprint.
+- Directories include tracked and non-ignored untracked files recursively.
+  Explicitly named files are included even if ignored. Use `--extra-input` for
+  additional ignored files or file globs; it remains additive to the scope.
+- Scoped identities hash actual file contents and modes, independent of HEAD
+  and staging. An unrelated commit or staging unchanged contents remains a hit.
+- Tests that depend on Git metadata or other external state must fingerprint
+  that state explicitly (for example with `--fingerprint-command`) or keep the
+  default mode. Scoping is a dependency declaration, not automatic discovery.
+- Scopes traversing symlinks or selecting submodules are rejected. Use the
+  default mode for those repositories and account for any external inputs.
+- `status --json` reports `source.inputs` and `source.input_file_count` for
+  inspection. Environment/toolchain changes, failures, and relevant input
+  mutations during execution retain the existing protections.
+
+Omit `inputs` to preserve whole-repository behavior and existing cache keys.
+Separate scopes still have separate suite names and commands: editing test A
+does not invalidate test B unless B declares that file or a containing directory.
+Editing a shared dependency invalidates both scopes that declare it.
+
 ## Run, inspect, calibrate, and invalidate
 
 ```bash
@@ -197,11 +253,11 @@ TEST-ONCE HIT: PASS
 
 The result includes the exact key, source identity, command, timestamp, original duration, and retained log path.
 
-Focused tests continue to run normally because the hook rewrites only exact commands configured for a full suite.
+Unconfigured focused tests continue to run normally; the hook rewrites only exact configured commands.
 
 `stats` reports:
 
-- `runs_avoided`: full-suite processes that did not need to start;
+- `runs_avoided`: configured test-command executions that did not need to start;
 - `nominal_test_seconds_avoided`: original passing-run durations associated with hits, explicitly not a wall-time claim;
 - `calibrated_cache_hits` and `uncalibrated_cache_hits`: measurement coverage;
 - `calibrated_wall_seconds_saved`: native warm-baseline time minus hit-resolution time, available only for calibrated hits;

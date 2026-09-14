@@ -1,6 +1,6 @@
 ---
 name: test-once
-description: Reuse exact passing repository-wide test results across Codex, Claude Code, and Cursor sessions with source, command, environment, toolchain fingerprints, and single-flight locking. Use before expensive full unit or integration suites, when checking an existing full-suite pass, or when configuring shared test caching. Never use for focused tests.
+description: Reuse passing configured test commands across agents with source, command, environment, and toolchain fingerprints. Use for full suites or explicitly scoped test files and groups with complete declared dependencies. Unconfigured focused tests run normally.
 ---
 
 # Test Once
@@ -9,8 +9,8 @@ Run the bundled `scripts/test_once.py` by resolving it relative to this `SKILL.m
 
 ## Apply the policy
 
-- Treat only a configured repository-wide suite as cacheable. Run focused tests directly.
-- Accept a cache hit as current full-suite evidence only when the runner reports `TEST-ONCE HIT: PASS`; the runner has already matched the source snapshot, command, platform, selected environment, and toolchain fingerprint.
+- Cache full suites or explicitly configured test files/groups with complete input scopes. Run unconfigured focused tests directly.
+- Accept `TEST-ONCE HIT: PASS` as evidence only for that configured command. A scoped test-file pass does not prove the full suite passed. The runner matches declared source inputs, command, platform, selected environment, and toolchain fingerprints.
 - Never infer a full-suite pass from `HEAD` alone. Dirty tracked files and untracked files are included in the source fingerprint.
 - Cache only successful runs. Let failed runs execute again.
 - If the runner reports that the source changed during testing, do not claim success for the current state; stabilize the worktree and rerun.
@@ -68,6 +68,32 @@ python3 <skill-dir>/scripts/test_once.py run \
 ```
 
 This shares the result but cannot enable automatic hook rewriting until the repository is configured.
+
+## Configure finer granularity
+
+Use repeated `init --input PATH` options for the actual test files, transitive
+business-code dependencies, shared code, setup hooks, fixtures, configuration,
+and lockfiles. Each path is a literal repository-relative file or directory,
+and must exist at initialization. Directories include tracked and non-ignored
+untracked files recursively. Explicit files are included even if ignored;
+`--extra-input` adds ignored files or globs. Use a separate named command for
+each independently reusable test file or group.
+
+```bash
+python3 <skill-dir>/scripts/test_once.py init \
+  --suite auth-file --command 'pnpm exec vitest run tests/auth.test.ts' \
+  --input tests/auth.test.ts --input src --input tests/setup.ts \
+  --input vitest.config.ts --input package.json --input pnpm-lock.yaml
+python3 <skill-dir>/scripts/test_once.py run --suite auth-file
+```
+
+Derive paths from the repository; the example is not a universal dependency
+list. Unknown dependency closure requires broader inputs or whole-repository
+mode. Scoped identities ignore HEAD and staging changes: Git metadata and
+external-state dependencies need explicit fingerprints. Scoped symlinks and
+submodules are unsupported. This feature does not automatically infer imports
+or split a full-suite command. `status --json` exposes the input roots and file
+count. Omitting `inputs` preserves the existing whole-repository behavior.
 
 ## Inspect or invalidate
 
