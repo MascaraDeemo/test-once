@@ -182,6 +182,93 @@ class TestOnceIntegrationTest(unittest.TestCase):
         self.assertIn("Conflicting Test Once configurations", run.stdout)
         self.assertFalse(counter.exists())
 
+    def test_lossy_textconv_cannot_hide_a_failing_source_change(self) -> None:
+        repo, _, _ = self.make_repo("textconv")
+        (repo / ".gitattributes").write_text("tracked.txt diff=mask\n", encoding="utf-8")
+        (repo / "normalize.py").write_text("print('normalized')\n", encoding="utf-8")
+        (repo / "runner.py").write_text(
+            "from pathlib import Path\n"
+            "raise SystemExit(0 if Path('tracked.txt').read_text() == 'good\\n' else 9)\n",
+            encoding="utf-8",
+        )
+        self.git(repo, "config", "diff.mask.textconv",
+                 shlex.join([sys.executable, "normalize.py"]))
+        self.git(repo, "add", ".")
+        self.git(repo, "commit", "-qm", "configure lossy text conversion")
+        (repo / "tracked.txt").write_text("good\n", encoding="utf-8")
+        first = self.command(repo, "run")
+        self.assertIn("TEST-ONCE STORED: PASS", first.stdout)
+        (repo / "tracked.txt").write_text("evil\n", encoding="utf-8")
+        changed = self.command(repo, "run", check=False)
+        self.assertEqual(changed.returncode, 9, changed.stdout)
+        self.assertNotIn("TEST-ONCE HIT: PASS", changed.stdout)
+
+    def test_deinitialized_submodule_cannot_reuse_a_pass(self) -> None:
+        repo, _, _ = self.make_repo("submodule-parent")
+        child, _, _ = self.make_repo("submodule-child")
+        self.git(repo, "-c", "protocol.file.allow=always", "submodule", "add",
+                 "-q", str(child), "module")
+        (repo / "runner.py").write_text(
+            "from pathlib import Path\n"
+            "raise SystemExit(0 if Path('module/tracked.txt').exists() else 9)\n",
+            encoding="utf-8",
+        )
+        self.git(repo, "add", ".")
+        self.git(repo, "commit", "-qm", "test initialized submodule")
+        self.assertIn("TEST-ONCE STORED: PASS", self.command(repo, "run").stdout)
+        self.assertIn("TEST-ONCE HIT: PASS", self.command(repo, "run").stdout)
+        self.git(repo, "submodule", "deinit", "-f", "module")
+        changed = self.command(repo, "run", check=False)
+        self.assertEqual(changed.returncode, 9, changed.stdout)
+        self.assertNotIn("TEST-ONCE HIT: PASS", changed.stdout)
+
+    def test_old_cache_schema_is_not_reused_and_stats_are_preserved(self) -> None:
+        repo, counter, _ = self.make_repo("old-cache")
+        self.command(repo, "run")
+        status = json.loads(self.command(repo, "status", "--json").stdout)
+        result_path = Path(status["result_path"])
+        old = json.loads(result_path.read_text(encoding="utf-8"))
+        old["cache_schema"] = 1
+        result_path.write_text(json.dumps(old), encoding="utf-8")
+        rerun = self.command(repo, "run")
+        self.assertIn("TEST-ONCE MISS:", rerun.stdout)
+        self.assertEqual(counter.read_text(), "2")
+        stats = json.loads(self.command(repo, "stats", "--json").stdout)
+        self.assertEqual(stats["executed_runs"], 2)
+        self.assertEqual(stats["cache_hits"], 0)
+
+    def test_nested_submodule_state_and_dirty_contents_are_fingerprinted(self) -> None:
+        repo, _, _ = self.make_repo("nested-parent")
+        child, _, _ = self.make_repo("nested-child")
+        leaf, _, _ = self.make_repo("nested-leaf")
+        self.git(child, "-c", "protocol.file.allow=always", "submodule", "add",
+                 "-q", str(leaf), "nested")
+        self.git(child, "commit", "-qam", "add nested submodule")
+        self.git(repo, "-c", "protocol.file.allow=always", "submodule", "add",
+                 "-q", str(child), "module")
+        self.git(repo, "-c", "protocol.file.allow=always", "submodule", "update",
+                 "--init", "--recursive")
+        (repo / "runner.py").write_text(
+            "from pathlib import Path\n"
+            "p = Path('module/nested/tracked.txt')\n"
+            "raise SystemExit(0 if p.is_file() and p.read_text() == 'base\\n' else 9)\n",
+            encoding="utf-8",
+        )
+        self.git(repo, "add", ".")
+        self.git(repo, "commit", "-qm", "test nested submodule")
+        self.git(repo, "config", "submodule.module.ignore", "all")
+        self.git(repo / "module", "config", "submodule.nested.ignore", "all")
+        self.command(repo, "run")
+        self.git(repo / "module", "submodule", "deinit", "-f", "nested")
+        missing = self.command(repo, "run", check=False)
+        self.assertEqual(missing.returncode, 9, missing.stdout)
+        self.git(repo, "-c", "protocol.file.allow=always", "submodule", "update",
+                 "--init", "--recursive")
+        (repo / "module/nested/tracked.txt").write_text("evil\n", encoding="utf-8")
+        dirty = self.command(repo, "run", check=False)
+        self.assertEqual(dirty.returncode, 9, dirty.stdout)
+        self.assertNotIn("TEST-ONCE HIT: PASS", dirty.stdout)
+
     def test_success_is_reused_and_dirty_change_gets_new_key(self) -> None:
         repo, counter, _ = self.make_repo("reuse")
         first = self.command(repo, "run")
@@ -588,6 +675,92 @@ class TestOnceIntegrationTest(unittest.TestCase):
 
         self.assertEqual(stats.returncode, 2)
         self.assertIn("incompatible Test Once statistics", stats.stdout)
+
+    def test_hooks_preserve_subdirectory_command_scope(self) -> None:
+        repo, _, test_command = self.make_repo("hook-cwd")
+        child = repo / "child"
+        child.mkdir()
+        (child / "runner.py").write_text("raise SystemExit(9)\n", encoding="utf-8")
+        self.git(repo, "add", ".")
+        self.git(repo, "commit", "-qm", "add a different child suite")
+        direct = subprocess.run(test_command, cwd=child, shell=True, check=False)
+        self.assertEqual(direct.returncode, 9)
+        for hook, event, tool, directory_field in (
+            (HOOK, "PreToolUse", "Bash", "workdir"),
+            (CURSOR_HOOK, "preToolUse", "Shell", "working_directory"),
+        ):
+            for use_override in (False, True):
+                with self.subTest(hook=hook.name, use_override=use_override):
+                    tool_input = {"command": test_command}
+                    if use_override:
+                        tool_input[directory_field] = str(child)
+                    payload = {
+                        "hook_event_name": event,
+                        "tool_name": tool,
+                        "cwd": str(repo if use_override else child),
+                        "tool_input": tool_input,
+                    }
+                    result = subprocess.run(
+                        [sys.executable, str(hook)],
+                        input=json.dumps(payload), text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+                    )
+                    self.assertEqual(result.stdout, "")
+
+    def test_hooks_do_not_merge_shell_quoting_semantics(self) -> None:
+        repo, _, _ = self.make_repo("hook-quotes")
+        (repo / "check.py").write_text(
+            "import sys\nraise SystemExit(0 if sys.argv[1] == 'good' else 9)\n",
+            encoding="utf-8",
+        )
+        prefix = shlex.join([sys.executable, "check.py"])
+        configured = prefix + ' "$MODE"'
+        requested = prefix + " '$MODE'"
+        self.command(repo, "init", "--force", "--command", configured,
+                     "--fingerprint-command", "none", "--env", "MODE")
+        env = dict(os.environ, MODE="good")
+        self.assertEqual(subprocess.run(configured, cwd=repo, shell=True, env=env).returncode, 0)
+        self.assertEqual(subprocess.run(requested, cwd=repo, shell=True, env=env).returncode, 9)
+        for hook, event, tool in (
+            (HOOK, "PreToolUse", "Bash"),
+            (CURSOR_HOOK, "preToolUse", "Shell"),
+        ):
+            with self.subTest(hook=hook.name):
+                payload = {
+                    "hook_event_name": event, "tool_name": tool,
+                    "cwd": str(repo), "tool_input": {"command": requested},
+                }
+                result = subprocess.run(
+                    [sys.executable, str(hook)], input=json.dumps(payload),
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+                )
+                self.assertEqual(result.stdout, "")
+                payload["tool_input"]["command"] = configured
+                exact = subprocess.run(
+                    [sys.executable, str(hook)], input=json.dumps(payload),
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+                )
+                self.assertIn("test_once.py", exact.stdout)
+
+    def test_hooks_keep_supporting_simple_rtk_wrappers(self) -> None:
+        repo, _, command = self.make_repo("rtk-wrappers")
+        for hook, event, tool in (
+            (HOOK, "PreToolUse", "Bash"),
+            (CURSOR_HOOK, "preToolUse", "Shell"),
+        ):
+            for wrapper in ("rtk", "rtk proxy", "/opt/bin/rtk", "/opt/bin/rtk proxy"):
+                with self.subTest(hook=hook.name, wrapper=wrapper):
+                    payload = {
+                        "hook_event_name": event, "tool_name": tool,
+                        "cwd": str(repo),
+                        "tool_input": {"command": f"{wrapper} {command}"},
+                    }
+                    result = subprocess.run(
+                        [sys.executable, str(hook)], input=json.dumps(payload),
+                        text=True, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, check=True,
+                    )
+                    self.assertIn("run --suite full-ut", result.stdout)
 
     def test_hook_injects_policy_and_rewrites_only_exact_suite(self) -> None:
         repo, _, test_command = self.make_repo("hook")

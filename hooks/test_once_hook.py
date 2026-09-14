@@ -97,6 +97,10 @@ def handle_pre_tool_use(payload: dict[str, Any]) -> None:
         return
     try:
         repo, _ = test_once.discover_repo(cwd)
+        # Configured commands run at the repository root. Identical text in a
+        # child directory can select an entirely different suite.
+        if cwd.expanduser().resolve() != repo:
+            return
         config = test_once.load_config(repo)
         matches = test_once.find_matching_suites(config, command)
     except test_once.TestOnceError:

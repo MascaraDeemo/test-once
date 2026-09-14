@@ -25,9 +25,9 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 CONFIG_SCHEMA = 1
-CACHE_SCHEMA = 1
+CACHE_SCHEMA = 2
 STATS_SCHEMA = 2
 CONFIG_RELATIVE_PATH = Path(".test-once.json")
 LEGACY_CONFIG_RELATIVE_PATHS = (Path(".codex") / "test-once.json",)
@@ -210,7 +210,20 @@ def command_tokens(command: str) -> list[str]:
 
 
 def normalize_command_for_match(command: str) -> str:
-    return "\x1f".join(command_tokens(command))
+    # shlex.split discards shell semantics: "$VAR" and '$VAR' are different
+    # commands even though they have identical parsed tokens. Keep the shell
+    # text verbatim, apart from a conservatively recognized RTK wrapper.
+    wrapper = re.match(r"(?:[A-Za-z0-9_./@+-]+/)?rtk[ \t]+", command)
+    if wrapper is None:
+        return command
+    remainder = command[wrapper.end():]
+    proxy = re.match(r"proxy(?:[ \t]+|$)", remainder)
+    if proxy is not None:
+        remainder = remainder[proxy.end():]
+    # Leave quoted/dynamic executable names and incomplete wrappers untouched.
+    if not re.match(r"[A-Za-z0-9_./@+-]+(?:[ \t]|$)", remainder):
+        return command
+    return remainder
 
 
 def find_matching_suites(config: dict[str, Any], command: str) -> list[str]:
@@ -252,7 +265,10 @@ def hash_file(hasher: Any, path: Path, logical_name: str) -> None:
 
 def hash_git_diff(hasher: Any, repo: Path, head: str) -> None:
     process = subprocess.Popen(
-        ["git", "-C", str(repo), "diff", "--binary", "--no-ext-diff", head, "--"],
+        [
+            "git", "-C", str(repo), "diff", "--binary", "--no-ext-diff",
+            "--no-textconv", head, "--",
+        ],
         cwd=repo,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -285,16 +301,24 @@ def sparse_checkout_identity(repo: Path) -> str | None:
     return hashlib.sha256(payload).hexdigest()
 
 
+def submodule_identity(repo: Path) -> str | None:
+    if not (repo / ".gitmodules").is_file():
+        return None
+    # Parent status can be clean both before and after deinitialization. Include
+    # recursive checkout state; an unreadable submodule must not permit reuse.
+    result = run_capture(
+        ["git", "-C", str(repo), "submodule", "status", "--recursive"], repo
+    )
+    return hashlib.sha256(result.stdout).hexdigest()
+
+
 def initialized_submodule_roots(repo: Path) -> list[Path]:
     if not (repo / ".gitmodules").is_file():
         return []
     result = run_capture(
         ["git", "-C", str(repo), "submodule", "foreach", "--quiet", "--recursive", "pwd"],
         repo,
-        check=False,
     )
-    if result.returncode != 0:
-        return []
     roots: set[Path] = set()
     for raw in result.stdout.splitlines():
         if raw:
@@ -316,11 +340,11 @@ def hash_dirty_submodules(hasher: Any, repo: Path) -> None:
                 "--porcelain=v1",
                 "-z",
                 "--untracked-files=all",
+                "--ignore-submodules=none",
             ],
             submodule,
-            check=False,
         )
-        if status_result.returncode != 0 or not status_result.stdout:
+        if not status_result.stdout:
             continue
         relative = submodule.relative_to(repo)
         hasher.update(f"submodule:{relative}\0".encode("utf-8", "surrogateescape"))
@@ -398,33 +422,31 @@ def source_identity(repo: Path, suite: dict[str, Any]) -> dict[str, Any]:
             "--porcelain=v1",
             "-z",
             "--untracked-files=all",
+            "--ignore-submodules=none",
         ],
         repo,
     )
     dirty = bool(status_result.stdout)
     extra_paths = checked_extra_paths(repo, suite.get("extra_inputs", []))
     sparse = sparse_checkout_identity(repo)
-    if not dirty and not extra_paths and sparse is None and head != "UNBORN":
+    submodules = submodule_identity(repo)
+    if not dirty and not extra_paths and submodules is None and head != "UNBORN":
         return {
             "head": head,
             "dirty": False,
-            "fingerprint": f"git:{head}",
-        }
-    if not dirty and not extra_paths and sparse is not None and head != "UNBORN":
-        return {
-            "head": head,
-            "dirty": False,
-            "fingerprint": f"git:{head}:sparse:{sparse}",
+            "fingerprint": f"git:{head}" + (f":sparse:{sparse}" if sparse is not None else ""),
         }
 
     hasher = hashlib.sha256()
-    hasher.update(b"test-once-source-v1\0")
+    hasher.update(b"test-once-source-v2\0")
     hasher.update(head.encode())
     hasher.update(b"\0")
     hasher.update(status_result.stdout)
     hasher.update(b"\0")
     if sparse is not None:
         hasher.update(f"sparse:{sparse}\0".encode())
+    if submodules is not None:
+        hasher.update(f"submodules:{submodules}\0".encode())
     if head != "UNBORN":
         hash_git_diff(hasher, repo, head)
     else:
