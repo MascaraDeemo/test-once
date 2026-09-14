@@ -108,14 +108,19 @@ A commit ID alone is not enough to prove that two test inputs are identical.
 Test Once also accounts for:
 
 - dirty tracked files, staged changes, and untracked files;
-- initialized submodules and sparse-checkout state;
+- recursive submodule initialization, checkout and dirty state, plus sparse-checkout state;
 - the configured full-suite command;
 - operating system and architecture;
 - selected environment variables and relevant default variables;
 - the executable and toolchain version.
 
-Clean Git worktrees that share the same common repository directory and commit
-share a result. Separate clones remain isolated.
+Clean Git worktrees that share the same common repository directory, commit,
+and checkout state share a result. Separate clones remain isolated.
+
+Version 0.3.1 changes the cache identity schema to reject passes created by
+earlier versions. Each exact suite must run once again; existing aggregate
+statistics and old cache files are retained. Source diffs disable Git textconv
+so a display converter cannot hide a change in tested contents.
 
 ## Requirements
 
@@ -162,7 +167,17 @@ readable; the next successful `init` update migrates them to the neutral path.
 Add repeated `--match` options for exact alternate spellings that the hooks
 should intercept.
 
-If a command is wrapped by `rtk` or `rtk proxy`, Test Once ignores that leading wrapper while matching. `rtk` is optional and is never required to run the plugin.
+Hooks intercept configured commands only when the request's working directory
+is the repository root. A command from a child directory runs unchanged, since
+identical command text there may select a different suite. To configure a child
+suite, declare its root-relative command, such as `npm --prefix server test`,
+and invoke it from the root (or use the explicit runner).
+
+Matching preserves the exact shell text, including quotes, escapes, whitespace,
+and expansions. Use `--match` for alternate spellings you have verified select
+the same suite. A simple unquoted `rtk` or `rtk proxy` prefix is ignored when
+followed by an unquoted static executable name; ordinary executable paths are
+also supported. Uncertain wrappers remain unchanged. `rtk` is optional.
 
 ## Run, inspect, calibrate, and invalidate
 

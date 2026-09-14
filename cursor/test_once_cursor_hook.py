@@ -63,7 +63,10 @@ def handle_pre_tool_use(payload: dict[str, Any]) -> None:
     if str(shared.RUNNER) in command or shared.RUNNER.name in command:
         return
     try:
-        repo, _ = test_once.discover_repo(payload_cwd(payload))
+        cwd = payload_cwd(payload)
+        repo, _ = test_once.discover_repo(cwd)
+        if cwd.expanduser().resolve() != repo:
+            return
         config = test_once.load_config(repo)
         matches = test_once.find_matching_suites(config, command)
     except test_once.TestOnceError:

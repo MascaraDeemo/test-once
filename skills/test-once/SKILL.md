@@ -51,7 +51,11 @@ python3 <skill-dir>/scripts/test_once.py init \
   --env NODE_OPTIONS
 ```
 
-Use repeated `--match` values for exact alternate spellings that should be intercepted. Matching is token-based and intentionally not substring- or regex-based. A leading `rtk` or `rtk proxy` wrapper is ignored during matching; `rtk` is optional.
+Use repeated `--match` values for verified equivalent alternate spellings that should be intercepted. Matching preserves exact shell text, including quoting, escapes, whitespace, and expansions. Simple unquoted `rtk` or `rtk proxy` prefixes with static executable names are ignored; uncertain wrappers remain unchanged. `rtk` is optional.
+
+Configured commands run from the repository root. Hooks leave requests from child directories unchanged because the same text can select a different suite there. Configure a root-relative command for a child suite, and invoke it from the root or use the explicit runner.
+
+Version 0.3.1 uses a new cache identity schema: earlier passing entries are not reused, while aggregate statistics are retained. Expect one fresh execution for each exact suite after upgrading.
 
 Add `--env NAME` for environment variables that affect test behavior and `--extra-input PATH_OR_GLOB` for ignored files that affect tests. Use `--ttl-seconds N` only when the suite depends on time-varying external state.
 
