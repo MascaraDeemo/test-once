@@ -1,7 +1,7 @@
 {
   "name": "test-once",
-  "version": "0.3.1",
-  "description": "Stop duplicate expensive full-suite runs across Codex, Claude Code, and Cursor sessions, reuse exact passing results, and report honest warm-calibrated savings.",
+  "version": "0.4.0",
+  "description": "Reuse full-suite or scoped test-command results across agents with declared dependency inputs and honest warm-calibrated savings.",
   "author": {
     "name": "MascaraDeemo",
     "url": "https://github.com/MascaraDeemo"
@@ -27,8 +27,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Test Once",
-    "shortDescription": "Reuse exact full-suite passes across coding agents.",
-    "longDescription": "Stop development, review, and parallel sessions across Codex, Claude Code, and Cursor from rerunning the same expensive full suite. Test Once reuses only passing results matched by exact source, command, environment, platform, and toolchain fingerprints; single-flight locking collapses concurrent runs across agents; focused tests stay untouched; and local statistics separate nominal avoided test work from optional warm-calibrated wall-time savings. It works with Go, TypeScript, and any shell-driven test suite without telemetry.",
+    "shortDescription": "Reuse full-suite or scoped test results across agents.",
+    "longDescription": "Reuse passing configured test commands across Codex, Claude Code, and Cursor. Whole-repository inputs are the default; explicit dependency scopes enable independent test-file or group reuse. Source, command, environment, platform, and toolchain fingerprints protect cache identity, with single-flight locking and local nominal or warm-calibrated savings statistics. Dependency scopes are declared, not inferred automatically.",
     "developerName": "MascaraDeemo",
     "category": "Productivity",
     "capabilities": [
@@ -37,8 +37,8 @@
     ],
     "websiteURL": "https://github.com/MascaraDeemo/test-once",
     "defaultPrompt": [
-      "Configure shared Test Once for this repository's full test suite.",
-      "Run or reuse the configured full test suite safely.",
+      "Configure Test Once for full suites or tests with explicit dependency scopes.",
+      "Run or reuse the configured test commands safely.",
       "Show avoided runs and warm-calibrated wall-time savings."
     ]
   }
